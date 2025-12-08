@@ -325,13 +325,16 @@ class TemplatesPopup(QWidget):
         self.list_widget.setStyleSheet("""
             QListWidget {
                 border: none;
-                background: transparent;
+                background: white;
                 outline: none;
+                font-size: 12px;
             }
             QListWidget::item {
-                padding: 8px;
+                padding: 10px;
                 border-radius: 4px;
                 margin: 2px 0px;
+                color: #333;
+                background-color: white;
             }
             QListWidget::item:selected {
                 background-color: #2196F3;
@@ -339,6 +342,7 @@ class TemplatesPopup(QWidget):
             }
             QListWidget::item:hover {
                 background-color: #E3F2FD;
+                color: #333;
             }
         """)
         layout.addWidget(self.list_widget)
@@ -416,7 +420,8 @@ class FloatingCircle(QWidget):
         super().__init__()
         self.db = db
         self.dragging = False
-        self.offset = QPoint()
+        self.drag_start_position = QPoint()
+        self.click_position = QPoint()
         self.menu = None
         self.init_ui()
     
@@ -428,24 +433,27 @@ class FloatingCircle(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        self.button = QPushButton('⚙', self)
-        self.button.setFixedSize(60, 60)
-        self.button.setStyleSheet("""
-            QPushButton {
+        # Criar widget container ao invés de usar botão
+        self.container = QWidget(self)
+        self.container.setFixedSize(60, 60)
+        self.container.setStyleSheet("""
+            QWidget {
                 background-color: rgba(100, 100, 100, 180);
                 border-radius: 30px;
-                color: white;
-                font-size: 24px;
-                border: none;
             }
-            QPushButton:hover {
+            QWidget:hover {
                 background-color: rgba(80, 80, 80, 200);
             }
         """)
-        self.button.clicked.connect(self.show_menu)
+        
+        # Label com ícone
+        label = QLabel('⚙', self.container)
+        label.setStyleSheet("color: white; font-size: 24px; background: transparent;")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setGeometry(0, 0, 60, 60)
         
         layout = QVBoxLayout()
-        layout.addWidget(self.button)
+        layout.addWidget(self.container)
         layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         
@@ -460,24 +468,36 @@ class FloatingCircle(QWidget):
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.offset = event.pos()
+            self.dragging = False
+            self.click_position = event.globalPosition().toPoint()
+            self.drag_start_position = event.globalPosition().toPoint() - self.pos()
+            event.accept()
     
     def mouseMoveEvent(self, event):
-        if self.dragging:
-            new_pos = self.mapToGlobal(event.pos() - self.offset)
-            self.move(new_pos)
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            moved_distance = (event.globalPosition().toPoint() - self.click_position).manhattanLength()
+            
+            if moved_distance > 5:
+                self.dragging = True
+                new_pos = event.globalPosition().toPoint() - self.drag_start_position
+                self.move(new_pos)
+            
+            event.accept()
     
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.dragging:
+                # Foi arraste - salvar posição
+                pos = self.pos()
+                self.db.save_position(pos.x(), pos.y())
+            else:
+                # Foi clique - abrir menu
+                self.show_menu()
+            
             self.dragging = False
-            pos = self.pos()
-            self.db.save_position(pos.x(), pos.y())
+            event.accept()
     
     def show_menu(self):
-        if self.dragging:
-            return
-        
         if self.menu:
             self.menu.close()
         
@@ -746,7 +766,7 @@ class MainMenu(QWidget):
     def add_template(self):
         self.add_window = AddTemplateWindow(self.db, self)
         self.add_window.show()
-        self.close()
+        # Não fechar o menu aqui, deixar aberto
     
     def focusOutEvent(self, event):
         self.close()
@@ -754,9 +774,13 @@ class MainMenu(QWidget):
 
 class AddTemplateWindow(QWidget):
     def __init__(self, db, parent=None):
-        super().__init__(parent)
+        super().__init__()
         self.db = db
         self.parent_menu = parent
+        
+        # Garantir que a janela apareça na frente
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+        
         self.init_ui()
     
     def init_ui(self):
@@ -827,10 +851,16 @@ class AddTemplateWindow(QWidget):
         QMessageBox.information(self, 'Sucesso', 'Template salvo com sucesso!')
         self.close()
         
-        if self.parent_menu and hasattr(self.parent_menu, 'circle_parent'):
-            circle = self.parent_menu.circle_parent
-            if circle:
-                QTimer.singleShot(100, circle.show_menu)
+        # Reabrir menu atualizado
+        if self.parent_menu:
+            # Fechar menu atual
+            self.parent_menu.close()
+            
+            # Reabrir menu com dados atualizados
+            if hasattr(self.parent_menu, 'circle_parent'):
+                circle = self.parent_menu.circle_parent
+                if circle:
+                    QTimer.singleShot(200, circle.show_menu)
 
 
 def main():
