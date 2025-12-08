@@ -1,0 +1,8 @@
+poder escolher template clicando no popup tbm
+poder escolher templates com as setas de cima e baixo tbm
+arruma design do assistive touch e fazer com q eu possa mover ele com o mouse
+transformar em um arquivo .exe q eu possa instalar
+qnd eu for atualizar poder baixar a atualização direto do .exe tbm
+criar seções dos templates por setores, então se eu estiver com o setor digitação selecionado, aparece só os templates que o setor de digitação usa
+para acessar os templates de cada setor, tem uma senha, como se cada setor fosse um usuário
+o adicionar template não ta fazendo nada
