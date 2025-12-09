@@ -8,6 +8,76 @@ from PyQt6.QtGui import QCursor
 from pynput import keyboard
 from pynput.keyboard import Key, Controller
 
+
+class NotificationWidget(QWidget):
+    def __init__(self, message):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Container
+        container = QWidget()
+        container.setStyleSheet("""
+            QWidget {
+                background-color: #88c22b;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(15, 10, 15, 10)
+        
+        label = QLabel(message)
+        label.setStyleSheet("color: white; font-size: 12px; font-weight: bold;")
+        layout.addWidget(label)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(container)
+        
+        self.adjustSize()
+        
+        # Posicionar no canto inferior direito
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.width() - self.width() - 20, screen.height() - self.height() - 50)
+        
+        # Auto-fechar após 2 segundos
+        QTimer.singleShot(2000, self.close)
+        
+        # Fade out
+        self.setWindowOpacity(1.0)
+        self.fade_timer = QTimer()
+        self.fade_timer.timeout.connect(self.fade_out)
+        QTimer.singleShot(1500, self.fade_timer.start)
+        self.opacity = 1.0
+    
+    def fade_out(self):
+        self.opacity -= 0.1
+        if self.opacity <= 0:
+            self.fade_timer.stop()
+            self.close()
+        else:
+            self.setWindowOpacity(self.opacity)
+
+
+class Database:
+    def __init__(self):
+        self.conn = sqlite3.connect('assistivetouch.db', check_same_thread=False)
+        self.create_tables()
+import sqlite3
+import time
+from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
+                              QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, QListWidgetItem)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal
+from PyQt6.QtGui import QCursor
+from pynput import keyboard
+from pynput.keyboard import Key, Controller
+
 class Database:
     def __init__(self):
         self.conn = sqlite3.connect('assistivetouch.db', check_same_thread=False)
@@ -129,7 +199,8 @@ class KeyboardListener:
                                 chars_to_delete = 2 + len(self.search_query)
                                 self.signals.insert_text.emit(texto, chars_to_delete)
                     return
-                elif key == Key.esc:
+                elif key == Key.esc or key == Key.space:
+                    # ESC ou ESPAÇO cancela a busca
                     self.cancel_search()
                     return
                 elif key == Key.backspace:
@@ -212,11 +283,17 @@ class KeyboardListener:
     def _insert_text_slot(self, texto, chars_to_delete):
         print(f"Inserindo texto: {texto[:30]}...")
         
-        # Fechar popup
+        # Resetar estado
         self.search_mode = False
         self.search_query = ""
+        self.typed_text = ""
+        
+        # Fechar popup se ainda estiver aberto
         if self.templates_popup:
-            self.templates_popup.close()
+            try:
+                self.templates_popup.close()
+            except:
+                pass
             self.templates_popup = None
         
         # Apagar e digitar em thread separada
@@ -247,14 +324,10 @@ class KeyboardListener:
     def cancel_search(self):
         print("Cancelando busca")
         self.search_mode = False
-        
-        chars_to_delete = 2 + len(self.search_query)
-        for _ in range(chars_to_delete):
-            self.keyboard_controller.press(Key.backspace)
-            self.keyboard_controller.release(Key.backspace)
-            time.sleep(0.01)
-        
         self.search_query = ""
+        self.typed_text = ""  # Resetar o buffer completamente
+        
+        # Fechar popup
         self.signals.close_popup.emit()
     
     def check_shortcuts(self):
@@ -345,6 +418,7 @@ class TemplatesPopup(QWidget):
                 color: #333;
             }
         """)
+        self.list_widget.itemClicked.connect(self.on_item_clicked)
         layout.addWidget(self.list_widget)
         
         # Info
@@ -413,6 +487,23 @@ class TemplatesPopup(QWidget):
             prev_row = max(current - 1, 0)
             self.list_widget.setCurrentRow(prev_row)
             self.selected_index = prev_row
+    
+    def on_item_clicked(self, item):
+        texto = item.data(Qt.ItemDataRole.UserRole)
+        if texto:
+            print("Template clicado no popup")
+            chars_to_delete = 2 + len(self.listener.search_query)
+            
+            # Resetar estado do listener
+            self.listener.search_mode = False
+            self.listener.search_query = ""
+            self.listener.typed_text = ""
+            
+            # Fechar popup
+            self.close()
+            
+            # Agendar inserção do texto
+            QTimer.singleShot(50, lambda: self.listener.signals.insert_text.emit(texto, chars_to_delete))
 
 
 class FloatingCircle(QWidget):
@@ -531,7 +622,7 @@ class MainMenu(QWidget):
         tabs_container = QWidget()
         tabs_layout = QHBoxLayout()
         tabs_layout.setContentsMargins(0, 0, 0, 0)
-        tabs_layout.setSpacing(0)
+        tabs_layout.setSpacing(2)
         
         self.btn_templates = QPushButton('Templates')
         self.btn_atalhos = QPushButton('Atalhos')
@@ -541,6 +632,30 @@ class MainMenu(QWidget):
         
         tabs_layout.addWidget(self.btn_templates)
         tabs_layout.addWidget(self.btn_atalhos)
+        
+        # Espaçamento menor antes do botão sair
+        tabs_layout.addSpacing(20)
+        
+        # Botão sair no canto direito
+        btn_sair = QPushButton('Sair')
+        btn_sair.setFixedWidth(60)
+        btn_sair.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #82414c;
+                border: none;
+                padding: 12px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(130, 65, 76, 0.15);
+                color: #82414c;
+            }
+        """)
+        btn_sair.clicked.connect(self.sair_programa)
+        tabs_layout.addWidget(btn_sair)
+        
         tabs_container.setLayout(tabs_layout)
         
         main_layout.addWidget(tabs_container)
@@ -548,7 +663,7 @@ class MainMenu(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background-color: #E8D5D0; }")
+        scroll.setStyleSheet("QScrollArea { border: none; background-color: #f5f0ed; }")
         
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout()
@@ -563,19 +678,19 @@ class MainMenu(QWidget):
         
         self.setStyleSheet("""
             QWidget {
-                background-color: #E8D5D0;
+                background-color: #f5f0ed;
                 border-radius: 10px;
             }
             QPushButton {
-                background-color: #C4A7A1;
-                color: #4A3535;
+                background-color: #c8bfb8;
+                color: #3d3d3d;
                 border: none;
                 padding: 12px;
                 font-size: 13px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #B39590;
+                background-color: #b8ada6;
             }
         """)
         
@@ -590,7 +705,7 @@ class MainMenu(QWidget):
         
         self.btn_templates.setStyleSheet("""
             QPushButton {
-                background-color: #A47C7C;
+                background-color: #406e54;
                 color: white;
                 border: none;
                 padding: 12px;
@@ -600,14 +715,14 @@ class MainMenu(QWidget):
         """)
         self.btn_atalhos.setStyleSheet("""
             QPushButton {
-                background-color: #C4A7A1;
-                color: #4A3535;
+                background-color: #c8bfb8;
+                color: #3d3d3d;
                 border: none;
                 padding: 12px;
                 font-size: 13px;
             }
             QPushButton:hover {
-                background-color: #B39590;
+                background-color: #b8ada6;
             }
         """)
         
@@ -615,15 +730,15 @@ class MainMenu(QWidget):
         btn_add.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: #8B4545;
+                color: #406e54;
                 border: none;
                 padding: 10px;
                 text-align: left;
                 font-size: 12px;
-                font-weight: normal;
+                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: rgba(164, 124, 124, 0.2);
+                background-color: rgba(64, 110, 84, 0.1);
             }
         """)
         btn_add.clicked.connect(self.add_template)
@@ -631,88 +746,75 @@ class MainMenu(QWidget):
         
         line = QWidget()
         line.setFixedHeight(1)
-        line.setStyleSheet("background-color: #C4A7A1;")
+        line.setStyleSheet("background-color: #d0c7c0;")
         self.content_layout.addWidget(line)
-        
-        info_container = QWidget()
-        info_layout = QVBoxLayout()
-        info_layout.setContentsMargins(10, 15, 10, 15)
-        
-        info_title = QLabel('💡 Como usar:')
-        info_title.setStyleSheet('font-weight: bold; font-size: 12px; color: #4A3535;')
-        info_layout.addWidget(info_title)
-        
-        info1 = QLabel('• Digite // e comece a buscar templates')
-        info1.setStyleSheet('font-size: 11px; color: #6B5555; margin-left: 10px;')
-        info_layout.addWidget(info1)
-        
-        info2 = QLabel('• Use → (seta direita) para inserir')
-        info2.setStyleSheet('font-size: 11px; color: #6B5555; margin-left: 10px;')
-        info_layout.addWidget(info2)
-        
-        info3 = QLabel('• Atalhos: digite + espaço (ex: otb + espaço)')
-        info3.setStyleSheet('font-size: 11px; color: #6B5555; margin-left: 10px;')
-        info_layout.addWidget(info3)
-        
-        info_container.setLayout(info_layout)
-        self.content_layout.addWidget(info_container)
         
         templates = self.db.get_templates()
         
         if templates:
-            templates_title = QLabel(f'Seus templates ({len(templates)}):')
-            templates_title.setStyleSheet('font-weight: bold; font-size: 12px; color: #4A3535; margin-top: 10px;')
-            self.content_layout.addWidget(templates_title)
-            
             for template in templates:
                 template_widget = QWidget()
                 template_widget.setStyleSheet("""
                     QWidget {
-                        background-color: rgba(196, 167, 161, 0.2);
-                        border: 1px solid #C4A7A1;
-                        border-radius: 5px;
-                        padding: 10px;
+                        background-color: white;
+                        border: 1px solid #d0c7c0;
+                        border-radius: 8px;
                     }
                 """)
                 
                 template_layout = QVBoxLayout()
-                template_layout.setContentsMargins(5, 5, 5, 5)
-                template_layout.setSpacing(3)
+                template_layout.setContentsMargins(12, 10, 12, 10)
+                template_layout.setSpacing(4)
+                
+                # Primeira linha: Nome e botão deletar
+                first_line = QHBoxLayout()
+                first_line.setSpacing(8)
                 
                 nome_label = QLabel(template[1])
-                nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #4A3535;')
-                template_layout.addWidget(nome_label)
+                nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
+                first_line.addWidget(nome_label, stretch=1)
                 
-                texto_preview = template[2][:60] + '...' if len(template[2]) > 60 else template[2]
-                texto_label = QLabel(texto_preview)
-                texto_label.setStyleSheet('font-size: 11px; color: #6B5555;')
-                texto_label.setWordWrap(True)
-                template_layout.addWidget(texto_label)
-                
-                if template[3]:
-                    atalho_label = QLabel(f'⚡ Atalho: {template[3]}')
-                    atalho_label.setStyleSheet('font-size: 10px; color: #8B4545; font-weight: bold;')
-                    template_layout.addWidget(atalho_label)
-                
-                btn_delete = QPushButton('🗑 Deletar')
+                # Botão deletar pequeno
+                btn_delete = QPushButton('🗑')
+                btn_delete.setFixedSize(24, 24)
                 btn_delete.setStyleSheet("""
                     QPushButton {
                         background-color: transparent;
-                        color: #D32F2F;
+                        color: #82414c;
                         border: none;
-                        padding: 5px;
-                        text-align: right;
-                        font-size: 10px;
+                        border-radius: 4px;
+                        font-size: 14px;
+                        padding: 0px;
                     }
                     QPushButton:hover {
-                        background-color: rgba(211, 47, 47, 0.1);
+                        background-color: rgba(130, 65, 76, 0.15);
                     }
                 """)
                 btn_delete.clicked.connect(lambda checked, tid=template[0]: self.delete_template(tid))
-                template_layout.addWidget(btn_delete)
+                first_line.addWidget(btn_delete)
+                
+                template_layout.addLayout(first_line)
+                
+                # Segunda linha: Preview do texto
+                texto_preview = template[2][:60] + '...' if len(template[2]) > 60 else template[2]
+                texto_label = QLabel(texto_preview)
+                texto_label.setStyleSheet('font-size: 11px; color: #777;')
+                texto_label.setWordWrap(True)
+                template_layout.addWidget(texto_label)
+                
+                # Terceira linha: Atalho (se existir)
+                if template[3]:
+                    atalho_label = QLabel(f'Atalho: ⚡ {template[3]}')
+                    atalho_label.setStyleSheet('font-size: 10px; color: #88c22b; font-weight: bold; margin-top: 2px;')
+                    template_layout.addWidget(atalho_label)
                 
                 template_widget.setLayout(template_layout)
                 self.content_layout.addWidget(template_widget)
+        else:
+            empty_label = QLabel('Nenhum template ainda.\nClique em "Adicionar template" para criar o primeiro!')
+            empty_label.setStyleSheet('color: #888; padding: 30px; font-size: 12px;')
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.content_layout.addWidget(empty_label)
         
         self.content_layout.addStretch()
     
@@ -735,19 +837,19 @@ class MainMenu(QWidget):
         
         self.btn_templates.setStyleSheet("""
             QPushButton {
-                background-color: #C4A7A1;
-                color: #4A3535;
+                background-color: #c8bfb8;
+                color: #3d3d3d;
                 border: none;
                 padding: 12px;
                 font-size: 13px;
             }
             QPushButton:hover {
-                background-color: #B39590;
+                background-color: #b8ada6;
             }
         """)
         self.btn_atalhos.setStyleSheet("""
             QPushButton {
-                background-color: #A47C7C;
+                background-color: #406e54;
                 color: white;
                 border: none;
                 padding: 12px;
@@ -757,7 +859,7 @@ class MainMenu(QWidget):
         """)
         
         label = QLabel('Atalhos (em breve)')
-        label.setStyleSheet('color: #8B6B6B; padding: 20px; font-size: 12px;')
+        label.setStyleSheet('color: #888; padding: 20px; font-size: 12px;')
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.content_layout.addWidget(label)
         
@@ -766,7 +868,37 @@ class MainMenu(QWidget):
     def add_template(self):
         self.add_window = AddTemplateWindow(self.db, self)
         self.add_window.show()
-        # Não fechar o menu aqui, deixar aberto
+    
+    def sair_programa(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar saída')
+        msg.setText('Deseja realmente fechar o programa?')
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QLabel {
+                color: #2d2d2d;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 4px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
+        
+        reply = msg.exec()
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            QApplication.quit()
     
     def focusOutEvent(self, event):
         self.close()
@@ -782,6 +914,10 @@ class AddTemplateWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         
         self.init_ui()
+    
+    def closeEvent(self, event):
+        # Não fazer nada ao fechar - apenas aceitar o evento
+        event.accept()
     
     def init_ui(self):
         self.setWindowTitle('Novo Template')
@@ -847,20 +983,19 @@ class AddTemplateWindow(QWidget):
             QMessageBox.warning(self, 'Erro', 'Preencha pelo menos o nome e o texto!')
             return
         
+        # Salvar template
         self.db.add_template(nome, texto, atalho)
-        QMessageBox.information(self, 'Sucesso', 'Template salvo com sucesso!')
-        self.close()
         
-        # Reabrir menu atualizado
-        if self.parent_menu:
-            # Fechar menu atual
-            self.parent_menu.close()
-            
-            # Reabrir menu com dados atualizados
-            if hasattr(self.parent_menu, 'circle_parent'):
-                circle = self.parent_menu.circle_parent
-                if circle:
-                    QTimer.singleShot(200, circle.show_menu)
+        # Mostrar notificação não-intrusiva
+        self.notification = NotificationWidget('✓ Template salvo!')
+        self.notification.show()
+        
+        # Atualizar menu se estiver aberto (sem fechar nada)
+        if self.parent_menu and hasattr(self.parent_menu, 'show_templates_tab'):
+            QTimer.singleShot(100, self.parent_menu.show_templates_tab)
+        
+        # Fechar janela por último
+        self.close()
 
 
 def main():

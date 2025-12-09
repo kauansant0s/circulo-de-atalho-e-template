@@ -1,11 +1,8 @@
 poder escolher template clicando no popup tbm
-poder escolher templates com as setas de cima e baixo tbm
-arruma design do assistive touch e fazer com q eu possa mover ele com o mouse
 transformar em um arquivo .exe q eu possa instalar
 qnd eu for atualizar poder baixar a atualização direto do .exe tbm
 criar seções dos templates por setores, então se eu estiver com o setor digitação selecionado, aparece só os templates que o setor de digitação usa
 para acessar os templates de cada setor, tem uma senha, como se cada setor fosse um usuário
-o assistivetouch ainda fecha qnd q eu adiciono um novo template
-qnd eu criar um template, eu quero que a janela de criação de template se feche, e só isso, no máximo uma caixinha temporária no canto inferior direito que não interfere em nada e q eu n precise clicar para fechar
-tirar o aviso que aparece na tela qnd adiciono um template, quero que ele só adicione qnd eu clicar em salvar e não mostre nada, ou se mostrar, que n seja algo q eu tenha q clicar para fechar
-se eu digitar "//" e der um espaço, o popup se fecha
+ainda tem uma borda para cada linha no design (tirar print)
+o popup abre onde o mouse está, eu quero q abra onde o campo de texto está
+ainda fecha o programa qnd cancelo uma adição de template
