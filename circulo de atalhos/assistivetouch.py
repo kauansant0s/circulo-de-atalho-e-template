@@ -1,12 +1,15 @@
 import sys
 import sqlite3
 import time
+import json
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-                              QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, QListWidgetItem)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal
-from PyQt6.QtGui import QCursor
-from pynput import keyboard
-from pynput.keyboard import Key, Controller
+                              QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
+                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect
+from PyQt6.QtGui import QCursor, QPainter, QColor
+from pynput import keyboard, mouse
+from pynput.keyboard import Key, Controller as KeyboardController
+from pynput.mouse import Button, Controller as MouseController
 
 
 class NotificationWidget(QWidget):
@@ -105,6 +108,16 @@ class Database:
                 )
             ''')
         
+        # Tabela de atalhos (shortcuts de automação)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS shortcuts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                ativo INTEGER DEFAULT 1,
+                acoes TEXT NOT NULL
+            )
+        ''')
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS config (
                 chave TEXT PRIMARY KEY,
@@ -136,6 +149,42 @@ class Database:
     def delete_template(self, id):
         cursor = self.conn.cursor()
         cursor.execute('DELETE FROM templates WHERE id = ?', (id,))
+        self.conn.commit()
+    
+    # Métodos para Shortcuts
+    def add_shortcut(self, nome, acoes):
+        cursor = self.conn.cursor()
+        acoes_json = json.dumps(acoes)
+        cursor.execute('INSERT INTO shortcuts (nome, ativo, acoes) VALUES (?, 1, ?)', 
+                      (nome, acoes_json))
+        self.conn.commit()
+    
+    def get_shortcuts(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT id, nome, ativo, acoes FROM shortcuts')
+        results = cursor.fetchall()
+        shortcuts = []
+        for row in results:
+            shortcuts.append({
+                'id': row[0],
+                'nome': row[1],
+                'ativo': row[2] == 1,
+                'acoes': json.loads(row[3])
+            })
+        return shortcuts
+    
+    def toggle_shortcut(self, id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT ativo FROM shortcuts WHERE id = ?', (id,))
+        result = cursor.fetchone()
+        if result:
+            novo_status = 0 if result[0] == 1 else 1
+            cursor.execute('UPDATE shortcuts SET ativo = ? WHERE id = ?', (novo_status, id))
+            self.conn.commit()
+    
+    def delete_shortcut(self, id):
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM shortcuts WHERE id = ?', (id,))
         self.conn.commit()
     
     def save_position(self, x, y):
@@ -258,18 +307,32 @@ class KeyboardListener:
         
         self.templates_popup = TemplatesPopup(self.db, self)
         
-        popup_y = y - self.templates_popup.height() - 10
+        # Posicionar próximo ao mouse (onde provavelmente está o cursor de texto)
+        popup_x = x + 10  # Pequeno offset para não cobrir o texto
+        popup_y = y - self.templates_popup.height() - 5  # Acima do cursor
         
+        # Verificar limites da tela
         screen = QApplication.primaryScreen().geometry()
-        if popup_y < 0:
-            popup_y = y + 20
         
-        self.templates_popup.move(x, popup_y)
+        # Ajustar se sair da tela pela direita
+        if popup_x + self.templates_popup.width() > screen.width() - 10:
+            popup_x = screen.width() - self.templates_popup.width() - 10
+        
+        # Ajustar se sair pela esquerda
+        if popup_x < 10:
+            popup_x = 10
+        
+        # Se não couber acima, mostrar abaixo
+        if popup_y < 10:
+            popup_y = y + 25
+        
+        print(f"Popup na posição do mouse: {popup_x}, {popup_y}")
+        self.templates_popup.move(popup_x, popup_y)
         self.templates_popup.show()
         self.templates_popup.raise_()
-        self.templates_popup.setFocus()
+        self.templates_popup.activateWindow()
         
-        print(f"Popup mostrado em: {x}, {popup_y}")
+        print(f"Popup visível? {self.templates_popup.isVisible()}")
     
     def _update_popup_slot(self, query):
         if self.templates_popup:
@@ -589,6 +652,19 @@ class FloatingCircle(QWidget):
             event.accept()
     
     def show_menu(self):
+        print(f"Círculo: show_menu chamado. Menu existe? {self.menu is not None}")
+        if self.menu:
+            print(f"Círculo: Menu está visível? {self.menu.isVisible()}")
+        
+        # Se o menu já está aberto, apenas fechar
+        if self.menu and self.menu.isVisible():
+            print("Círculo: Menu já está aberto, fechando...")
+            self.menu.close()
+            self.menu = None
+            return
+        
+        # Caso contrário, abrir novo menu
+        print("Círculo: Abrindo novo menu...")
         if self.menu:
             self.menu.close()
         
@@ -597,6 +673,7 @@ class FloatingCircle(QWidget):
         menu_y = self.y()
         self.menu.move(menu_x, menu_y)
         self.menu.show()
+        print("Círculo: Menu mostrado")
 
 
 class MainMenu(QWidget):
@@ -604,13 +681,14 @@ class MainMenu(QWidget):
         super().__init__(parent)
         self.db = db
         self.circle_parent = parent
+        self.add_window = None  # Manter referência
         self.init_ui()
     
     def init_ui(self):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | 
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Popup
+            Qt.WindowType.Tool  # Removido Popup
         )
         
         self.setFixedWidth(350)
@@ -858,16 +936,127 @@ class MainMenu(QWidget):
             }
         """)
         
-        label = QLabel('Atalhos (em breve)')
-        label.setStyleSheet('color: #888; padding: 20px; font-size: 12px;')
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.content_layout.addWidget(label)
+        btn_add = QPushButton('Adicionar atalho')
+        btn_add.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #406e54;
+                border: none;
+                padding: 10px;
+                text-align: left;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(64, 110, 84, 0.1);
+            }
+        """)
+        btn_add.clicked.connect(self.add_shortcut)
+        self.content_layout.addWidget(btn_add)
+        
+        line = QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background-color: #d0c7c0;")
+        self.content_layout.addWidget(line)
+        
+        shortcuts = self.db.get_shortcuts()
+        
+        if shortcuts:
+            for shortcut in shortcuts:
+                shortcut_widget = QWidget()
+                shortcut_widget.setStyleSheet("""
+                    QWidget {
+                        background-color: white;
+                        border: 1px solid #d0c7c0;
+                        border-radius: 8px;
+                    }
+                """)
+                
+                shortcut_layout = QVBoxLayout()
+                shortcut_layout.setContentsMargins(12, 10, 12, 10)
+                shortcut_layout.setSpacing(4)
+                
+                # Primeira linha: Nome e Toggle
+                first_line = QHBoxLayout()
+                first_line.setSpacing(8)
+                
+                nome_label = QLabel(shortcut['nome'])
+                nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
+                first_line.addWidget(nome_label, stretch=1)
+                
+                # Toggle switch
+                toggle = QCheckBox()
+                toggle.setChecked(shortcut['ativo'])
+                toggle.setStyleSheet("""
+                    QCheckBox::indicator {
+                        width: 40px;
+                        height: 20px;
+                        border-radius: 10px;
+                        background-color: #ccc;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #88c22b;
+                    }
+                """)
+                toggle.clicked.connect(lambda checked, sid=shortcut['id']: self.toggle_shortcut_status(sid))
+                first_line.addWidget(toggle)
+                
+                shortcut_layout.addLayout(first_line)
+                
+                # Segunda linha: Resumo das ações
+                acoes_texto = f"{len(shortcut['acoes'])} ações configuradas"
+                acoes_label = QLabel(acoes_texto)
+                acoes_label.setStyleSheet('font-size: 11px; color: #777;')
+                shortcut_layout.addWidget(acoes_label)
+                
+                shortcut_widget.setLayout(shortcut_layout)
+                self.content_layout.addWidget(shortcut_widget)
+        else:
+            empty_label = QLabel('Nenhum atalho ainda.\nClique em "Adicionar atalho" para criar o primeiro!')
+            empty_label.setStyleSheet('color: #888; padding: 30px; font-size: 12px;')
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.content_layout.addWidget(empty_label)
         
         self.content_layout.addStretch()
     
-    def add_template(self):
-        self.add_window = AddTemplateWindow(self.db, self)
+    def add_shortcut(self):
+        print("MainMenu: Abrindo janela de adicionar atalho")
+        if self.add_window and self.add_window.isVisible():
+            self.add_window.close()
+        
+        self.add_window = AddShortcutWindow(self.db, menu_ref=self)
         self.add_window.show()
+        self.add_window.raise_()
+        self.add_window.activateWindow()
+    
+    def toggle_shortcut_status(self, shortcut_id):
+        self.db.toggle_shortcut(shortcut_id)
+        self.show_atalhos_tab()
+    
+    def add_template(self):
+        print("MainMenu: Abrindo janela de adicionar template")
+        try:
+            # Fechar janela anterior se existir
+            if self.add_window and self.add_window.isVisible():
+                print("MainMenu: Fechando janela anterior")
+                self.add_window.close()
+            
+            # Criar nova janela
+            self.add_window = AddTemplateWindow(self.db, menu_ref=self)
+            print(f"MainMenu: Janela criada: {self.add_window}")
+            print(f"MainMenu: Parent da janela: {self.add_window.parent()}")
+            
+            # Importante: NÃO fechar o menu
+            # self.close()  <- REMOVIDO
+            
+            self.add_window.show()
+            self.add_window.raise_()
+            self.add_window.activateWindow()
+            print("MainMenu: Janela mostrada com sucesso")
+        except Exception as e:
+            print(f"MainMenu: ERRO ao criar janela: {e}")
+            import traceback
+            traceback.print_exc()
     
     def sair_programa(self):
         msg = QMessageBox(self)
@@ -901,23 +1090,208 @@ class MainMenu(QWidget):
             QApplication.quit()
     
     def focusOutEvent(self, event):
-        self.close()
+        # NÃO fechar automaticamente ao perder foco
+        # Deixar o usuário fechar manualmente clicando no círculo
+        print("MainMenu: focusOutEvent - NÃO fechando automaticamente")
+        pass
 
 
-class AddTemplateWindow(QWidget):
-    def __init__(self, db, parent=None):
-        super().__init__()
-        self.db = db
-        self.parent_menu = parent
+class AddShortcutWindow(QWidget):
+    def __init__(self, db, menu_ref=None):
+        print("AddShortcutWindow: __init__ chamado")
+        super().__init__(None)
         
-        # Garantir que a janela apareça na frente
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+        self.db = db
+        self.menu_reference = menu_ref
+        self.acoes = []  # Lista de ações do atalho
+        
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         
         self.init_ui()
     
+    def init_ui(self):
+        self.setWindowTitle('Novo Atalho')
+        self.setFixedSize(500, 500)
+        
+        layout = QVBoxLayout()
+        
+        title = QLabel('Criar Novo Atalho')
+        title.setStyleSheet('font-weight: bold; font-size: 15px; padding: 10px;')
+        layout.addWidget(title)
+        
+        layout.addWidget(QLabel('Nome do atalho:'))
+        self.nome_input = QLineEdit()
+        self.nome_input.setPlaceholderText('Ex: Abrir planilha')
+        layout.addWidget(self.nome_input)
+        
+        layout.addWidget(QLabel('Ações:'))
+        
+        # Lista de ações
+        self.acoes_list = QListWidget()
+        self.acoes_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.acoes_list)
+        
+        # Botões para adicionar ações
+        acoes_buttons = QHBoxLayout()
+        
+        btn_click = QPushButton('+ Clique')
+        btn_click.clicked.connect(self.add_click_action)
+        acoes_buttons.addWidget(btn_click)
+        
+        btn_sleep = QPushButton('+ Esperar')
+        btn_sleep.clicked.connect(self.add_sleep_action)
+        acoes_buttons.addWidget(btn_sleep)
+        
+        layout.addLayout(acoes_buttons)
+        
+        # Botões finais
+        btn_layout = QHBoxLayout()
+        
+        btn_salvar = QPushButton('✓ Salvar')
+        btn_salvar.setStyleSheet("""
+            QPushButton {
+                background-color: #88c22b;
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #79b325;
+            }
+        """)
+        btn_salvar.clicked.connect(self.salvar)
+        btn_layout.addWidget(btn_salvar)
+        
+        btn_cancelar = QPushButton('✗ Cancelar')
+        btn_cancelar.clicked.connect(self.close)
+        btn_layout.addWidget(btn_cancelar)
+        
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+    
+    def add_click_action(self):
+        # Criar overlay escuro para capturar clique
+        self.overlay = ClickCaptureOverlay()
+        self.overlay.coordinate_captured.connect(self.on_coordinate_captured)
+        self.overlay.showFullScreen()
+    
+    def on_coordinate_captured(self, x, y):
+        self.acoes.append({'type': 'click', 'x': x, 'y': y})
+        self.update_acoes_list()
+    
+    def add_sleep_action(self):
+        # Diálogo simples para pedir o tempo
+        from PyQt6.QtWidgets import QInputDialog
+        tempo, ok = QInputDialog.getInt(self, 'Esperar', 'Tempo em milissegundos:', 1000, 100, 60000, 100)
+        if ok:
+            self.acoes.append({'type': 'sleep', 'ms': tempo})
+            self.update_acoes_list()
+    
+    def update_acoes_list(self):
+        self.acoes_list.clear()
+        for i, acao in enumerate(self.acoes):
+            if acao['type'] == 'click':
+                texto = f"{i+1}. Clique em ({acao['x']}, {acao['y']})"
+            elif acao['type'] == 'sleep':
+                texto = f"{i+1}. Esperar {acao['ms']}ms"
+            self.acoes_list.addItem(texto)
+    
+    def salvar(self):
+        nome = self.nome_input.text().strip()
+        
+        if not nome:
+            QMessageBox.warning(self, 'Erro', 'Preencha o nome do atalho!')
+            return
+        
+        if len(self.acoes) == 0:
+            QMessageBox.warning(self, 'Erro', 'Adicione pelo menos uma ação!')
+            return
+        
+        self.db.add_shortcut(nome, self.acoes)
+        
+        notification = NotificationWidget('✓ Atalho salvo!')
+        notification.show()
+        
+        if hasattr(self, 'menu_reference') and self.menu_reference:
+            QTimer.singleShot(100, self.menu_reference.show_atalhos_tab)
+        
+        self.close()
+    
     def closeEvent(self, event):
-        # Não fazer nada ao fechar - apenas aceitar o evento
+        print("AddShortcutWindow: closeEvent chamado")
+        self.menu_reference = None
         event.accept()
+
+
+class ClickCaptureOverlay(QWidget):
+    coordinate_captured = pyqtSignal(int, int)
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))  # Escuro semi-transparente
+        
+        # Desenhar instruções
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 
+                        "Clique onde deseja que o atalho clique\nESC para cancelar")
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            x = event.globalPosition().x()
+            y = event.globalPosition().y()
+            self.coordinate_captured.emit(int(x), int(y))
+            self.close()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+
+
+class AddTemplateWindow(QWidget):
+    def __init__(self, db, menu_ref=None):
+        print("AddTemplateWindow: __init__ chamado")
+        super().__init__(None)  # Explicitamente sem parent
+        print(f"AddTemplateWindow: super().__init__ concluído, parent={self.parent()}")
+        
+        self.db = db
+        self.menu_reference = menu_ref
+        
+        # Janela completamente independente
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        
+        print("AddTemplateWindow: Flags configuradas, chamando init_ui")
+        self.init_ui()
+        print("AddTemplateWindow: init_ui concluído")
+    
+    def closeEvent(self, event):
+        print("AddTemplateWindow: closeEvent chamado")
+        # Limpar referências
+        self.menu_reference = None
+        # Apenas aceitar
+        event.accept()
+        print("AddTemplateWindow: fechado com sucesso")
+    
+    def __del__(self):
+        print("AddTemplateWindow: __del__ chamado (objeto sendo destruído)")
     
     def init_ui(self):
         self.setWindowTitle('Novo Template')
@@ -1000,6 +1374,9 @@ class AddTemplateWindow(QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    
+    # CRITICAL: Impedir que o app feche quando a última janela fecha
+    app.setQuitOnLastWindowClosed(False)
     
     db = Database()
     

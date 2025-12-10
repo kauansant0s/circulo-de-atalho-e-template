@@ -3,6 +3,9 @@ transformar em um arquivo .exe q eu possa instalar
 qnd eu for atualizar poder baixar a atualização direto do .exe tbm
 criar seções dos templates por setores, então se eu estiver com o setor digitação selecionado, aparece só os templates que o setor de digitação usa
 para acessar os templates de cada setor, tem uma senha, como se cada setor fosse um usuário
-ainda tem uma borda para cada linha no design (tirar print)
-o popup abre onde o mouse está, eu quero q abra onde o campo de texto está
-ainda fecha o programa qnd cancelo uma adição de template
+o programa não fecha qnd clico fora do circulo
+trocar o idioma do "yes" e "no" nas confirmações
+adicionar a opção de poder editar e excluir o atalho
+poder configurar o atalho de teclado para fazer a sequencia de ações
+que o sistema reconheça caso uma combinação de teclas já exista em outro atalho e n deixe usar duplicada
+limite de tres teclas para o comando de teclado
