@@ -9,3 +9,4 @@ adicionar a opção de poder editar e excluir o atalho
 poder configurar o atalho de teclado para fazer a sequencia de ações
 que o sistema reconheça caso uma combinação de teclas já exista em outro atalho e n deixe usar duplicada
 limite de tres teclas para o comando de teclado
+poder adicionar observações em cada passo dos atalhos, para saber onde está clicando, etc.

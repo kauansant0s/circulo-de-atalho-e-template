@@ -114,9 +114,18 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT NOT NULL,
                 ativo INTEGER DEFAULT 1,
-                acoes TEXT NOT NULL
+                acoes TEXT NOT NULL,
+                tecla_atalho TEXT
             )
         ''')
+        
+        # Verificar se coluna tecla_atalho existe
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='shortcuts'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(shortcuts)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'tecla_atalho' not in columns:
+                cursor.execute('ALTER TABLE shortcuts ADD COLUMN tecla_atalho TEXT')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS config (
@@ -152,16 +161,23 @@ class Database:
         self.conn.commit()
     
     # Métodos para Shortcuts
-    def add_shortcut(self, nome, acoes):
+    def add_shortcut(self, nome, acoes, tecla_atalho=None):
         cursor = self.conn.cursor()
         acoes_json = json.dumps(acoes)
-        cursor.execute('INSERT INTO shortcuts (nome, ativo, acoes) VALUES (?, 1, ?)', 
-                      (nome, acoes_json))
+        cursor.execute('INSERT INTO shortcuts (nome, ativo, acoes, tecla_atalho) VALUES (?, 1, ?, ?)', 
+                      (nome, acoes_json, tecla_atalho))
+        self.conn.commit()
+    
+    def update_shortcut(self, id, nome, acoes, tecla_atalho=None):
+        cursor = self.conn.cursor()
+        acoes_json = json.dumps(acoes)
+        cursor.execute('UPDATE shortcuts SET nome = ?, acoes = ?, tecla_atalho = ? WHERE id = ?',
+                      (nome, acoes_json, tecla_atalho, id))
         self.conn.commit()
     
     def get_shortcuts(self):
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, nome, ativo, acoes FROM shortcuts')
+        cursor.execute('SELECT id, nome, ativo, acoes, tecla_atalho FROM shortcuts')
         results = cursor.fetchall()
         shortcuts = []
         for row in results:
@@ -169,7 +185,8 @@ class Database:
                 'id': row[0],
                 'nome': row[1],
                 'ativo': row[2] == 1,
-                'acoes': json.loads(row[3])
+                'acoes': json.loads(row[3]),
+                'tecla_atalho': row[4]
             })
         return shortcuts
     
@@ -218,12 +235,14 @@ class KeyboardListener:
     def __init__(self, db):
         self.db = db
         self.typed_text = ""
-        self.keyboard_controller = Controller()
+        self.keyboard_controller = KeyboardController()
+        self.mouse_controller = MouseController()
         self.listener = None
         self.templates_popup = None
         self.search_mode = False
         self.search_query = ""
         self.signals = KeyboardSignals()
+        self.alt_pressed = False
         
         # Conectar sinais
         self.signals.show_popup.connect(self._show_popup_slot)
@@ -232,11 +251,19 @@ class KeyboardListener:
         self.signals.insert_text.connect(self._insert_text_slot)
         
     def start(self):
-        self.listener = keyboard.Listener(on_press=self.on_key_press)
+        self.listener = keyboard.Listener(
+            on_press=self.on_key_press,
+            on_release=self.on_key_release
+        )
         self.listener.start()
     
     def on_key_press(self, key):
         try:
+            # Detectar Alt
+            if key == Key.alt_l or key == Key.alt_r or key == Key.alt:
+                self.alt_pressed = True
+                return
+            
             # Se estiver no modo de busca
             if self.search_mode:
                 if key == Key.right:
@@ -249,7 +276,6 @@ class KeyboardListener:
                                 self.signals.insert_text.emit(texto, chars_to_delete)
                     return
                 elif key == Key.esc or key == Key.space:
-                    # ESC ou ESPAÇO cancela a busca
                     self.cancel_search()
                     return
                 elif key == Key.backspace:
@@ -272,6 +298,11 @@ class KeyboardListener:
                     self.signals.update_popup.emit(self.search_query)
                     return
             
+            # Verificar atalhos Alt+Tecla
+            if self.alt_pressed and hasattr(key, 'char') and key.char:
+                self.check_alt_shortcuts(key.char.upper())
+                return
+            
             # Modo normal - detectar "//"
             if hasattr(key, 'char') and key.char:
                 self.typed_text += key.char
@@ -285,7 +316,7 @@ class KeyboardListener:
                     self.typed_text = self.typed_text[-30:]
             
             elif key == Key.space:
-                self.check_shortcuts()
+                self.check_text_shortcuts()
                 self.typed_text = ""
             
             elif key in [Key.enter, Key.tab]:
@@ -293,6 +324,13 @@ class KeyboardListener:
                 
         except Exception as e:
             print(f"Erro no listener: {e}")
+    
+    def on_key_release(self, key):
+        try:
+            if key == Key.alt_l or key == Key.alt_r or key == Key.alt:
+                self.alt_pressed = False
+        except Exception as e:
+            print(f"Erro no release: {e}")
     
     def _show_popup_slot(self, x, y):
         print("=== INICIANDO BUSCA (via signal) ===")
@@ -393,10 +431,11 @@ class KeyboardListener:
         # Fechar popup
         self.signals.close_popup.emit()
     
-    def check_shortcuts(self):
+    def check_text_shortcuts(self):
         if not self.typed_text.strip():
             return
         
+        # Verificar templates com atalho de texto
         templates = self.db.get_templates()
         for template in templates:
             if template[3] and template[3].lower() == self.typed_text.strip().lower():
@@ -407,7 +446,70 @@ class KeyboardListener:
                 
                 time.sleep(0.05)
                 self.keyboard_controller.type(template[2])
-                break
+                return
+        
+        # Verificar shortcuts com atalho de texto
+        shortcuts = self.db.get_shortcuts()
+        for shortcut in shortcuts:
+            if not shortcut['ativo']:
+                continue
+            
+            tecla = shortcut.get('tecla_atalho', '')
+            # Se tem mais de 2 caracteres, é atalho de texto
+            if len(tecla) > 2 and tecla.lower() == self.typed_text.strip().lower():
+                # Apagar texto digitado
+                for _ in range(len(self.typed_text) + 1):
+                    self.keyboard_controller.press(Key.backspace)
+                    self.keyboard_controller.release(Key.backspace)
+                    time.sleep(0.01)
+                
+                # Executar ações do shortcut
+                self.execute_shortcut(shortcut['acoes'])
+                return
+    
+    def check_alt_shortcuts(self, char):
+        print(f"Verificando Alt+{char}")
+        shortcuts = self.db.get_shortcuts()
+        for shortcut in shortcuts:
+            if not shortcut['ativo']:
+                continue
+            
+            tecla = shortcut.get('tecla_atalho', '')
+            # Se tem 1-2 caracteres, é Alt+Tecla
+            if len(tecla) <= 2 and tecla.upper() == char.upper():
+                print(f"Executando shortcut: {shortcut['nome']}")
+                self.execute_shortcut(shortcut['acoes'])
+                return
+    
+    def execute_shortcut(self, acoes):
+        print(f"Executando {len(acoes)} ações...")
+        
+        def run():
+            try:
+                time.sleep(0.1)
+                for i, acao in enumerate(acoes):
+                    print(f"Ação {i+1}: {acao['type']}")
+                    
+                    if acao['type'] == 'click':
+                        self.mouse_controller.position = (acao['x'], acao['y'])
+                        self.mouse_controller.click(Button.left, 1)
+                        
+                    elif acao['type'] == 'type':
+                        self.keyboard_controller.type(acao['text'])
+                        
+                    elif acao['type'] == 'sleep':
+                        time.sleep(acao['ms'] / 1000.0)
+                    
+                    time.sleep(0.05)
+                
+                print("Ações concluídas!")
+            except Exception as e:
+                print(f"Erro ao executar ações: {e}")
+        
+        import threading
+        thread = threading.Thread(target=run)
+        thread.daemon = True
+        thread.start()
 
 
 class TemplatesPopup(QWidget):
@@ -669,6 +771,10 @@ class FloatingCircle(QWidget):
             self.menu.close()
         
         self.menu = MainMenu(self.db, self)
+        
+        # Conectar evento de fechar para limpar referência
+        self.menu.destroyed.connect(lambda: setattr(self, 'menu', None))
+        
         menu_x = self.x() - 360
         menu_y = self.y()
         self.menu.move(menu_x, menu_y)
@@ -687,9 +793,11 @@ class MainMenu(QWidget):
     def init_ui(self):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | 
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool  # Removido Popup
+            Qt.WindowType.WindowStaysOnTopHint
         )
+        
+        # IMPORTANTE: Manter o foco no menu
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
         self.setFixedWidth(350)
         
@@ -897,13 +1005,37 @@ class MainMenu(QWidget):
         self.content_layout.addStretch()
     
     def delete_template(self, template_id):
-        reply = QMessageBox.question(
-            self, 'Confirmar', 
-            'Deseja realmente deletar este template?',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar exclusão')
+        msg.setText('Deseja realmente deletar este template?')
         
-        if reply == QMessageBox.StandardButton.Yes:
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        msg.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QMessageBox QLabel {
+                color: #2d2d2d;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 4px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
+        
+        msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
             self.db.delete_template(template_id)
             self.show_templates_tab()
     
@@ -984,30 +1116,95 @@ class MainMenu(QWidget):
                 nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
                 first_line.addWidget(nome_label, stretch=1)
                 
-                # Toggle switch
-                toggle = QCheckBox()
+                # Toggle switch estilo iOS
+                toggle = QPushButton()
+                toggle.setCheckable(True)
                 toggle.setChecked(shortcut['ativo'])
-                toggle.setStyleSheet("""
-                    QCheckBox::indicator {
-                        width: 40px;
-                        height: 20px;
-                        border-radius: 10px;
-                        background-color: #ccc;
-                    }
-                    QCheckBox::indicator:checked {
-                        background-color: #88c22b;
-                    }
-                """)
-                toggle.clicked.connect(lambda checked, sid=shortcut['id']: self.toggle_shortcut_status(sid))
+                toggle.setFixedSize(50, 26)
+                
+                def update_toggle_style(btn, checked):
+                    if checked:
+                        btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #88c22b;
+                                border-radius: 13px;
+                                border: none;
+                            }
+                            QPushButton::before {
+                                content: '';
+                            }
+                        """)
+                    else:
+                        btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #ccc;
+                                border-radius: 13px;
+                                border: none;
+                            }
+                        """)
+                
+                update_toggle_style(toggle, shortcut['ativo'])
+                toggle.clicked.connect(lambda checked, sid=shortcut['id'], t=toggle: (
+                    self.toggle_shortcut_status(sid),
+                    update_toggle_style(t, checked)
+                ))
                 first_line.addWidget(toggle)
                 
                 shortcut_layout.addLayout(first_line)
                 
-                # Segunda linha: Resumo das ações
-                acoes_texto = f"{len(shortcut['acoes'])} ações configuradas"
+                # Segunda linha: Resumo das ações e atalho
+                acoes_texto = f"{len(shortcut['acoes'])} ações"
+                if shortcut.get('tecla_atalho'):
+                    tecla = shortcut['tecla_atalho']
+                    # Verificar se é apenas 1-2 caracteres (Alt + tecla)
+                    if len(tecla) <= 2 and tecla.isalpha():
+                        acoes_texto += f" • Comando: Alt+{tecla}"
+                    else:
+                        acoes_texto += f" • Atalho: {tecla}"
                 acoes_label = QLabel(acoes_texto)
                 acoes_label.setStyleSheet('font-size: 11px; color: #777;')
                 shortcut_layout.addWidget(acoes_label)
+                
+                # Botões de ação
+                buttons_layout = QHBoxLayout()
+                buttons_layout.setSpacing(5)
+                
+                btn_edit = QPushButton('✏ Editar')
+                btn_edit.setStyleSheet("""
+                    QPushButton {
+                        background-color: transparent;
+                        color: #406e54;
+                        border: 1px solid #406e54;
+                        padding: 4px 8px;
+                        border-radius: 3px;
+                        font-size: 10px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(64, 110, 84, 0.1);
+                    }
+                """)
+                btn_edit.clicked.connect(lambda checked, s=shortcut: self.edit_shortcut(s))
+                buttons_layout.addWidget(btn_edit)
+                
+                btn_delete = QPushButton('🗑 Excluir')
+                btn_delete.setStyleSheet("""
+                    QPushButton {
+                        background-color: transparent;
+                        color: #82414c;
+                        border: 1px solid #82414c;
+                        padding: 4px 8px;
+                        border-radius: 3px;
+                        font-size: 10px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(130, 65, 76, 0.1);
+                    }
+                """)
+                btn_delete.clicked.connect(lambda checked, sid=shortcut['id']: self.delete_shortcut(sid))
+                buttons_layout.addWidget(btn_delete)
+                
+                buttons_layout.addStretch()
+                shortcut_layout.addLayout(buttons_layout)
                 
                 shortcut_widget.setLayout(shortcut_layout)
                 self.content_layout.addWidget(shortcut_widget)
@@ -1028,6 +1225,51 @@ class MainMenu(QWidget):
         self.add_window.show()
         self.add_window.raise_()
         self.add_window.activateWindow()
+    
+    def edit_shortcut(self, shortcut):
+        print(f"MainMenu: Editando atalho {shortcut['id']}")
+        if self.add_window and self.add_window.isVisible():
+            self.add_window.close()
+        
+        self.add_window = AddShortcutWindow(self.db, menu_ref=self, shortcut_data=shortcut)
+        self.add_window.show()
+        self.add_window.raise_()
+        self.add_window.activateWindow()
+    
+    def delete_shortcut(self, shortcut_id):
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar exclusão')
+        msg.setText('Deseja realmente excluir este atalho?')
+        
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        msg.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QMessageBox QLabel {
+                color: #2d2d2d;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 4px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
+        
+        msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
+            self.db.delete_shortcut(shortcut_id)
+            self.show_atalhos_tab()
     
     def toggle_shortcut_status(self, shortcut_id):
         self.db.toggle_shortcut(shortcut_id)
@@ -1062,7 +1304,11 @@ class MainMenu(QWidget):
         msg = QMessageBox(self)
         msg.setWindowTitle('Confirmar saída')
         msg.setText('Deseja realmente fechar o programa?')
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        # Customizar botões em português
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
         msg.setStyleSheet("""
             QMessageBox {
                 background-color: white;
@@ -1084,26 +1330,27 @@ class MainMenu(QWidget):
             }
         """)
         
-        reply = msg.exec()
+        msg.exec()
         
-        if reply == QMessageBox.StandardButton.Yes:
+        if msg.clickedButton() == btn_sim:
             QApplication.quit()
     
     def focusOutEvent(self, event):
-        # NÃO fechar automaticamente ao perder foco
-        # Deixar o usuário fechar manualmente clicando no círculo
-        print("MainMenu: focusOutEvent - NÃO fechando automaticamente")
-        pass
+        # Fechar quando clicar fora
+        print("MainMenu: focusOutEvent - fechando")
+        self.close()
 
 
 class AddShortcutWindow(QWidget):
-    def __init__(self, db, menu_ref=None):
+    def __init__(self, db, menu_ref=None, shortcut_data=None):
         print("AddShortcutWindow: __init__ chamado")
         super().__init__(None)
         
         self.db = db
         self.menu_reference = menu_ref
-        self.acoes = []  # Lista de ações do atalho
+        self.shortcut_data = shortcut_data  # Para edição
+        self.acoes = shortcut_data['acoes'] if shortcut_data else []
+        self.shortcut_id = shortcut_data['id'] if shortcut_data else None
         
         self.setWindowFlags(Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -1111,19 +1358,50 @@ class AddShortcutWindow(QWidget):
         self.init_ui()
     
     def init_ui(self):
-        self.setWindowTitle('Novo Atalho')
-        self.setFixedSize(500, 500)
+        titulo = 'Editar Atalho' if self.shortcut_data else 'Novo Atalho'
+        self.setWindowTitle(titulo)
+        self.setFixedSize(550, 600)
         
         layout = QVBoxLayout()
         
-        title = QLabel('Criar Novo Atalho')
+        title = QLabel(titulo)
         title.setStyleSheet('font-weight: bold; font-size: 15px; padding: 10px;')
         layout.addWidget(title)
         
         layout.addWidget(QLabel('Nome do atalho:'))
         self.nome_input = QLineEdit()
         self.nome_input.setPlaceholderText('Ex: Abrir planilha')
+        if self.shortcut_data:
+            self.nome_input.setText(self.shortcut_data['nome'])
         layout.addWidget(self.nome_input)
+        
+        # Tipo de ativação
+        layout.addWidget(QLabel('Como ativar:'))
+        tipo_layout = QHBoxLayout()
+        
+        self.tipo_combo = QComboBox()
+        self.tipo_combo.addItems(['Alt + Tecla', 'Atalho de texto (ex: bd + espaço)'])
+        self.tipo_combo.currentIndexChanged.connect(self.on_tipo_changed)
+        tipo_layout.addWidget(self.tipo_combo)
+        
+        self.atalho_input = QLineEdit()
+        self.atalho_input.setPlaceholderText('Digite a tecla (ex: C para Alt+C)')
+        
+        # Detectar tipo baseado em dado existente
+        if self.shortcut_data and self.shortcut_data.get('tecla_atalho'):
+            tecla = self.shortcut_data['tecla_atalho']
+            if len(tecla) <= 2 and not '+' in tecla:
+                # É Alt + tecla
+                self.tipo_combo.setCurrentIndex(0)
+                self.atalho_input.setText(tecla)
+            else:
+                # É atalho de texto
+                self.tipo_combo.setCurrentIndex(1)
+                self.atalho_input.setText(tecla)
+        
+        tipo_layout.addWidget(self.atalho_input)
+        
+        layout.addLayout(tipo_layout)
         
         layout.addWidget(QLabel('Ações:'))
         
@@ -1137,12 +1415,20 @@ class AddShortcutWindow(QWidget):
         """)
         layout.addWidget(self.acoes_list)
         
+        # Atualizar lista se estiver editando
+        if self.acoes:
+            self.update_acoes_list()
+        
         # Botões para adicionar ações
         acoes_buttons = QHBoxLayout()
         
         btn_click = QPushButton('+ Clique')
         btn_click.clicked.connect(self.add_click_action)
         acoes_buttons.addWidget(btn_click)
+        
+        btn_type = QPushButton('+ Digitar')
+        btn_type.clicked.connect(self.add_type_action)
+        acoes_buttons.addWidget(btn_type)
         
         btn_sleep = QPushButton('+ Esperar')
         btn_sleep.clicked.connect(self.add_sleep_action)
@@ -1177,8 +1463,20 @@ class AddShortcutWindow(QWidget):
         layout.addLayout(btn_layout)
         self.setLayout(layout)
     
+    def on_tipo_changed(self, index):
+        if index == 0:
+            self.atalho_input.setPlaceholderText('Digite a tecla (ex: C para Alt+C)')
+        else:
+            self.atalho_input.setPlaceholderText('Digite o atalho (ex: bd, otb)')
+    
+    def add_type_action(self):
+        from PyQt6.QtWidgets import QInputDialog
+        texto, ok = QInputDialog.getText(self, 'Digitar texto', 'Texto para digitar:')
+        if ok and texto:
+            self.acoes.append({'type': 'type', 'text': texto})
+            self.update_acoes_list()
+    
     def add_click_action(self):
-        # Criar overlay escuro para capturar clique
         self.overlay = ClickCaptureOverlay()
         self.overlay.coordinate_captured.connect(self.on_coordinate_captured)
         self.overlay.showFullScreen()
@@ -1188,7 +1486,6 @@ class AddShortcutWindow(QWidget):
         self.update_acoes_list()
     
     def add_sleep_action(self):
-        # Diálogo simples para pedir o tempo
         from PyQt6.QtWidgets import QInputDialog
         tempo, ok = QInputDialog.getInt(self, 'Esperar', 'Tempo em milissegundos:', 1000, 100, 60000, 100)
         if ok:
@@ -1202,22 +1499,46 @@ class AddShortcutWindow(QWidget):
                 texto = f"{i+1}. Clique em ({acao['x']}, {acao['y']})"
             elif acao['type'] == 'sleep':
                 texto = f"{i+1}. Esperar {acao['ms']}ms"
+            elif acao['type'] == 'type':
+                preview = acao['text'][:30] + '...' if len(acao['text']) > 30 else acao['text']
+                texto = f"{i+1}. Digitar: {preview}"
             self.acoes_list.addItem(texto)
     
     def salvar(self):
         nome = self.nome_input.text().strip()
+        tecla_input = self.atalho_input.text().strip()
+        tipo_index = self.tipo_combo.currentIndex()
         
         if not nome:
             QMessageBox.warning(self, 'Erro', 'Preencha o nome do atalho!')
             return
         
+        if not tecla_input:
+            QMessageBox.warning(self, 'Erro', 'Configure como ativar o atalho!')
+            return
+        
+        # Processar tecla baseado no tipo
+        if tipo_index == 0:
+            # Alt + Tecla - apenas salvar a tecla, Alt é automático
+            tecla_atalho = tecla_input.upper()  # Normalizar para maiúscula
+        else:
+            # Atalho de texto
+            tecla_atalho = tecla_input.lower()  # Normalizar para minúscula
+        
         if len(self.acoes) == 0:
             QMessageBox.warning(self, 'Erro', 'Adicione pelo menos uma ação!')
             return
         
-        self.db.add_shortcut(nome, self.acoes)
+        if self.shortcut_id:
+            # Editando
+            self.db.update_shortcut(self.shortcut_id, nome, self.acoes, tecla_atalho)
+            msg = 'Atalho atualizado!'
+        else:
+            # Criando novo
+            self.db.add_shortcut(nome, self.acoes, tecla_atalho)
+            msg = 'Atalho salvo!'
         
-        notification = NotificationWidget('✓ Atalho salvo!')
+        notification = NotificationWidget(f'✓ {msg}')
         notification.show()
         
         if hasattr(self, 'menu_reference') and self.menu_reference:
