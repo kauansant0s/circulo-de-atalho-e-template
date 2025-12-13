@@ -432,40 +432,62 @@ class KeyboardListener:
         self.signals.close_popup.emit()
     
     def check_text_shortcuts(self):
+        print(f"=== check_text_shortcuts chamado ===")
+        print(f"Texto digitado: '{self.typed_text}'")
+        
         if not self.typed_text.strip():
+            print("Texto vazio, ignorando")
             return
         
         # Verificar templates com atalho de texto
         templates = self.db.get_templates()
+        print(f"Verificando {len(templates)} templates...")
         for template in templates:
-            if template[3] and template[3].lower() == self.typed_text.strip().lower():
-                for _ in range(len(self.typed_text) + 1):
-                    self.keyboard_controller.press(Key.backspace)
-                    self.keyboard_controller.release(Key.backspace)
-                    time.sleep(0.01)
-                
-                time.sleep(0.05)
-                self.keyboard_controller.type(template[2])
-                return
+            if template[3]:
+                print(f"  Template '{template[1]}' tem atalho: '{template[3]}'")
+                if template[3].lower() == self.typed_text.strip().lower():
+                    print(f"  -> MATCH! Executando template")
+                    for _ in range(len(self.typed_text) + 1):
+                        self.keyboard_controller.press(Key.backspace)
+                        self.keyboard_controller.release(Key.backspace)
+                        time.sleep(0.01)
+                    
+                    time.sleep(0.05)
+                    self.keyboard_controller.type(template[2])
+                    return
         
         # Verificar shortcuts com atalho de texto
         shortcuts = self.db.get_shortcuts()
+        print(f"Verificando {len(shortcuts)} shortcuts...")
         for shortcut in shortcuts:
+            print(f"  Shortcut '{shortcut['nome']}':")
+            print(f"    - Ativo: {shortcut['ativo']}")
+            print(f"    - Tecla: '{shortcut.get('tecla_atalho', '')}'")
+            
             if not shortcut['ativo']:
+                print(f"    -> Desativado, pulando")
                 continue
             
             tecla = shortcut.get('tecla_atalho', '')
+            print(f"    - Comparando '{tecla}' com '{self.typed_text.strip()}'")
+            
             # Se tem mais de 2 caracteres, é atalho de texto
-            if len(tecla) > 2 and tecla.lower() == self.typed_text.strip().lower():
-                # Apagar texto digitado
-                for _ in range(len(self.typed_text) + 1):
-                    self.keyboard_controller.press(Key.backspace)
-                    self.keyboard_controller.release(Key.backspace)
-                    time.sleep(0.01)
-                
-                # Executar ações do shortcut
-                self.execute_shortcut(shortcut['acoes'])
-                return
+            if len(tecla) > 2:
+                if tecla.lower() == self.typed_text.strip().lower():
+                    print(f"    -> MATCH! Executando shortcut com {len(shortcut['acoes'])} ações")
+                    # Apagar texto digitado
+                    for _ in range(len(self.typed_text) + 1):
+                        self.keyboard_controller.press(Key.backspace)
+                        self.keyboard_controller.release(Key.backspace)
+                        time.sleep(0.01)
+                    
+                    # Executar ações do shortcut
+                    self.execute_shortcut(shortcut['acoes'])
+                    return
+            else:
+                print(f"    -> Tecla muito curta ({len(tecla)} chars), é Alt+Tecla")
+        
+        print("=== Nenhum match encontrado ===")
     
     def check_alt_shortcuts(self, char):
         print(f"Verificando Alt+{char}")
@@ -793,11 +815,9 @@ class MainMenu(QWidget):
     def init_ui(self):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | 
-            Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Popup  # Popup fecha automaticamente ao clicar fora
         )
-        
-        # IMPORTANTE: Manter o foco no menu
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
         self.setFixedWidth(350)
         
@@ -1336,9 +1356,12 @@ class MainMenu(QWidget):
             QApplication.quit()
     
     def focusOutEvent(self, event):
-        # Fechar quando clicar fora
-        print("MainMenu: focusOutEvent - fechando")
-        self.close()
+        # Com Popup, não precisa fazer nada aqui
+        pass
+    
+    def closeEvent(self, event):
+        print("MainMenu: closeEvent")
+        event.accept()
 
 
 class AddShortcutWindow(QWidget):
