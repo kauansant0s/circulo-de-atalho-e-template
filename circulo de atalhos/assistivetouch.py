@@ -500,7 +500,16 @@ class KeyboardListener:
             # Se tem 1-2 caracteres, é Alt+Tecla
             if len(tecla) <= 2 and tecla.upper() == char.upper():
                 print(f"Executando shortcut: {shortcut['nome']}")
-                self.execute_shortcut(shortcut['acoes'])
+                
+                # IMPORTANTE: Soltar Alt antes de executar
+                def execute_delayed():
+                    time.sleep(0.1)  # Aguardar Alt ser solto
+                    self.execute_shortcut(shortcut['acoes'])
+                
+                import threading
+                thread = threading.Thread(target=execute_delayed)
+                thread.daemon = True
+                thread.start()
                 return
     
     def execute_shortcut(self, acoes):
@@ -513,8 +522,12 @@ class KeyboardListener:
                     print(f"Ação {i+1}: {acao['type']}")
                     
                     if acao['type'] == 'click':
-                        self.mouse_controller.position = (acao['x'], acao['y'])
-                        self.mouse_controller.click(Button.left, 1)
+                        vezes = acao.get('vezes', 1)
+                        for _ in range(vezes):
+                            self.mouse_controller.position = (acao['x'], acao['y'])
+                            self.mouse_controller.click(Button.left, 1)
+                            if vezes > 1:
+                                time.sleep(0.1)  # Pequeno delay entre cliques múltiplos
                         
                     elif acao['type'] == 'type':
                         self.keyboard_controller.type(acao['text'])
@@ -1136,39 +1149,53 @@ class MainMenu(QWidget):
                 nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
                 first_line.addWidget(nome_label, stretch=1)
                 
-                # Toggle switch estilo iOS
-                toggle = QPushButton()
+                # Toggle switch estilo iOS com bolinha
+                toggle_container = QWidget()
+                toggle_container.setFixedSize(50, 26)
+                toggle_layout = QHBoxLayout(toggle_container)
+                toggle_layout.setContentsMargins(0, 0, 0, 0)
+                
+                toggle = QPushButton(toggle_container)
                 toggle.setCheckable(True)
                 toggle.setChecked(shortcut['ativo'])
                 toggle.setFixedSize(50, 26)
+                toggle.setCursor(Qt.CursorShape.PointingHandCursor)
                 
-                def update_toggle_style(btn, checked):
+                # Função para atualizar estilo
+                def get_toggle_style(checked):
                     if checked:
-                        btn.setStyleSheet("""
+                        return """
                             QPushButton {
                                 background-color: #88c22b;
                                 border-radius: 13px;
                                 border: none;
+                                text-align: right;
+                                padding-right: 4px;
+                                color: white;
                             }
-                            QPushButton::before {
-                                content: '';
-                            }
-                        """)
+                        """
                     else:
-                        btn.setStyleSheet("""
+                        return """
                             QPushButton {
                                 background-color: #ccc;
                                 border-radius: 13px;
                                 border: none;
+                                text-align: left;
+                                padding-left: 4px;
+                                color: #666;
                             }
-                        """)
+                        """
                 
-                update_toggle_style(toggle, shortcut['ativo'])
-                toggle.clicked.connect(lambda checked, sid=shortcut['id'], t=toggle: (
-                    self.toggle_shortcut_status(sid),
-                    update_toggle_style(t, checked)
-                ))
-                first_line.addWidget(toggle)
+                toggle.setStyleSheet(get_toggle_style(shortcut['ativo']))
+                toggle.setText("●")  # Bolinha
+                
+                def on_toggle_clicked(checked, sid=shortcut['id']):
+                    print(f"Toggle clicado: {checked}")
+                    self.db.toggle_shortcut(sid)
+                    self.show_atalhos_tab()
+                
+                toggle.clicked.connect(on_toggle_clicked)
+                first_line.addWidget(toggle_container)
                 
                 shortcut_layout.addLayout(first_line)
                 
@@ -1500,28 +1527,79 @@ class AddShortcutWindow(QWidget):
             self.update_acoes_list()
     
     def add_click_action(self):
+        # Perguntar quantos cliques
+        from PyQt6.QtWidgets import QInputDialog
+        vezes, ok = QInputDialog.getInt(self, 'Cliques', 'Quantos cliques?', 1, 1, 100, 1)
+        if not ok:
+            return
+        
+        # Criar overlay escuro para capturar clique
         self.overlay = ClickCaptureOverlay()
-        self.overlay.coordinate_captured.connect(self.on_coordinate_captured)
+        self.overlay.coordinate_captured.connect(lambda x, y: self.on_coordinate_captured(x, y, vezes))
         self.overlay.showFullScreen()
     
-    def on_coordinate_captured(self, x, y):
-        self.acoes.append({'type': 'click', 'x': x, 'y': y})
+    def on_coordinate_captured(self, x, y, vezes=1):
+        self.acoes.append({'type': 'click', 'x': x, 'y': y, 'vezes': vezes})
         self.update_acoes_list()
     
     def add_sleep_action(self):
-        from PyQt6.QtWidgets import QInputDialog
-        tempo, ok = QInputDialog.getInt(self, 'Esperar', 'Tempo em milissegundos:', 1000, 100, 60000, 100)
-        if ok:
-            self.acoes.append({'type': 'sleep', 'ms': tempo})
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
+        
+        # Diálogo customizado com descrição
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Esperar')
+        dialog.setFixedWidth(300)
+        
+        layout = QVBoxLayout()
+        
+        layout.addWidget(QLabel('Tempo em milissegundos:'))
+        
+        spinbox = QSpinBox()
+        spinbox.setMinimum(100)
+        spinbox.setMaximum(60000)
+        spinbox.setValue(1000)
+        spinbox.setSingleStep(100)
+        layout.addWidget(spinbox)
+        
+        # Label de descrição
+        desc_label = QLabel('1000ms = 1 segundo')
+        desc_label.setStyleSheet('color: #666; font-size: 11px; font-style: italic;')
+        layout.addWidget(desc_label)
+        
+        # Atualizar descrição quando valor muda
+        def update_desc(value):
+            segundos = value / 1000.0
+            if segundos == 1.0:
+                desc_label.setText('1000ms = 1 segundo')
+            else:
+                desc_label.setText(f'{value}ms = {segundos:.1f} segundos')
+        
+        spinbox.valueChanged.connect(update_desc)
+        
+        # Botões
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.acoes.append({'type': 'sleep', 'ms': spinbox.value()})
             self.update_acoes_list()
     
     def update_acoes_list(self):
         self.acoes_list.clear()
         for i, acao in enumerate(self.acoes):
             if acao['type'] == 'click':
-                texto = f"{i+1}. Clique em ({acao['x']}, {acao['y']})"
+                vezes = acao.get('vezes', 1)
+                if vezes == 1:
+                    texto = f"{i+1}. Clique em ({acao['x']}, {acao['y']})"
+                else:
+                    texto = f"{i+1}. Clique {vezes}x em ({acao['x']}, {acao['y']})"
             elif acao['type'] == 'sleep':
-                texto = f"{i+1}. Esperar {acao['ms']}ms"
+                segundos = acao['ms'] / 1000.0
+                texto = f"{i+1}. Esperar {acao['ms']}ms ({segundos:.1f}s)"
             elif acao['type'] == 'type':
                 preview = acao['text'][:30] + '...' if len(acao['text']) > 30 else acao['text']
                 texto = f"{i+1}. Digitar: {preview}"
