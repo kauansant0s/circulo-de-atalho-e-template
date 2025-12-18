@@ -4,9 +4,9 @@ import time
 import json
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
-                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect
-from PyQt6.QtGui import QCursor, QPainter, QColor
+                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData
+from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag
 from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
 from pynput.mouse import Button, Controller as MouseController
@@ -67,19 +67,6 @@ class NotificationWidget(QWidget):
         else:
             self.setWindowOpacity(self.opacity)
 
-
-class Database:
-    def __init__(self):
-        self.conn = sqlite3.connect('assistivetouch.db', check_same_thread=False)
-        self.create_tables()
-import sqlite3
-import time
-from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-                              QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, QListWidgetItem)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal
-from PyQt6.QtGui import QCursor
-from pynput import keyboard
-from pynput.keyboard import Key, Controller
 
 class Database:
     def __init__(self):
@@ -528,6 +515,26 @@ class KeyboardListener:
                             self.mouse_controller.click(Button.left, 1)
                             if vezes > 1:
                                 time.sleep(0.1)  # Pequeno delay entre cliques múltiplos
+                    
+                    elif acao['type'] == 'right_click':
+                        self.mouse_controller.position = (acao['x'], acao['y'])
+                        self.mouse_controller.click(Button.right, 1)
+                    
+                    elif acao['type'] == 'drag':
+                        # Mover para posição inicial
+                        self.mouse_controller.position = (acao['x1'], acao['y1'])
+                        time.sleep(0.1)
+                        
+                        # Pressionar botão
+                        self.mouse_controller.press(Button.left)
+                        time.sleep(0.05)
+                        
+                        # Arrastar para posição final
+                        self.mouse_controller.position = (acao['x2'], acao['y2'])
+                        time.sleep(0.1)
+                        
+                        # Soltar botão
+                        self.mouse_controller.release(Button.left)
                         
                     elif acao['type'] == 'type':
                         self.keyboard_controller.type(acao['text'])
@@ -945,14 +952,16 @@ class MainMenu(QWidget):
             }
         """)
         
-        btn_add = QPushButton('Adicionar template')
+        # Botões de ação no topo
+        top_buttons = QHBoxLayout()
+        
+        btn_add = QPushButton('+ Adicionar')
         btn_add.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
                 color: #406e54;
                 border: none;
                 padding: 10px;
-                text-align: left;
                 font-size: 12px;
                 font-weight: bold;
             }
@@ -961,7 +970,29 @@ class MainMenu(QWidget):
             }
         """)
         btn_add.clicked.connect(self.add_template)
-        self.content_layout.addWidget(btn_add)
+        top_buttons.addWidget(btn_add)
+        
+        # Botão deletar selecionados (inicialmente oculto)
+        self.btn_delete_selected_templates = QPushButton('🗑 Excluir Selecionados')
+        self.btn_delete_selected_templates.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #82414c;
+                border: none;
+                padding: 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(130, 65, 76, 0.1);
+            }
+        """)
+        self.btn_delete_selected_templates.clicked.connect(self.delete_selected_templates)
+        self.btn_delete_selected_templates.hide()
+        top_buttons.addWidget(self.btn_delete_selected_templates)
+        
+        top_buttons.addStretch()
+        self.content_layout.addLayout(top_buttons)
         
         line = QWidget()
         line.setFixedHeight(1)
@@ -969,6 +1000,9 @@ class MainMenu(QWidget):
         self.content_layout.addWidget(line)
         
         templates = self.db.get_templates()
+        
+        # Lista para armazenar checkboxes selecionados
+        self.selected_templates = []
         
         if templates:
             for template in templates:
@@ -985,9 +1019,33 @@ class MainMenu(QWidget):
                 template_layout.setContentsMargins(12, 10, 12, 10)
                 template_layout.setSpacing(4)
                 
-                # Primeira linha: Nome e botão deletar
+                # Primeira linha: Checkbox, Nome e botão deletar
                 first_line = QHBoxLayout()
                 first_line.setSpacing(8)
+                
+                # Checkbox para seleção
+                checkbox = QCheckBox()
+                checkbox.setStyleSheet("""
+                    QCheckBox {
+                        spacing: 8px;
+                    }
+                    QCheckBox::indicator {
+                        width: 20px;
+                        height: 20px;
+                        border: 2px solid #888;
+                        border-radius: 3px;
+                        background-color: white;
+                    }
+                    QCheckBox::indicator:hover {
+                        border: 2px solid #88c22b;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #88c22b;
+                        border: 2px solid #88c22b;
+                    }
+                """)
+                checkbox.stateChanged.connect(lambda state, tid=template[0]: self.on_template_selection_changed(tid, state))
+                first_line.addWidget(checkbox)
                 
                 nome_label = QLabel(template[1])
                 nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
@@ -1036,6 +1094,62 @@ class MainMenu(QWidget):
             self.content_layout.addWidget(empty_label)
         
         self.content_layout.addStretch()
+    
+    def on_template_selection_changed(self, template_id, state):
+        """Callback quando checkbox de template é alterado"""
+        if state == Qt.CheckState.Checked.value:
+            if template_id not in self.selected_templates:
+                self.selected_templates.append(template_id)
+        else:
+            if template_id in self.selected_templates:
+                self.selected_templates.remove(template_id)
+        
+        # Mostrar/ocultar botão de deletar selecionados
+        if len(self.selected_templates) > 0:
+            self.btn_delete_selected_templates.show()
+        else:
+            self.btn_delete_selected_templates.hide()
+    
+    def delete_selected_templates(self):
+        """Deletar templates selecionados"""
+        if not self.selected_templates:
+            return
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar exclusão')
+        msg.setText(f'Deseja realmente deletar {len(self.selected_templates)} template(s)?')
+        
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        msg.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QMessageBox QLabel {
+                color: #2d2d2d;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 4px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
+        
+        msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
+            for template_id in self.selected_templates:
+                self.db.delete_template(template_id)
+            self.selected_templates.clear()
+            self.show_templates_tab()
     
     def delete_template(self, template_id):
         msg = QMessageBox(self)
@@ -1101,14 +1215,16 @@ class MainMenu(QWidget):
             }
         """)
         
-        btn_add = QPushButton('Adicionar atalho')
+        # Botões de ação no topo
+        top_buttons = QHBoxLayout()
+        
+        btn_add = QPushButton('+ Adicionar')
         btn_add.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
                 color: #406e54;
                 border: none;
                 padding: 10px;
-                text-align: left;
                 font-size: 12px;
                 font-weight: bold;
             }
@@ -1117,7 +1233,29 @@ class MainMenu(QWidget):
             }
         """)
         btn_add.clicked.connect(self.add_shortcut)
-        self.content_layout.addWidget(btn_add)
+        top_buttons.addWidget(btn_add)
+        
+        # Botão deletar selecionados (inicialmente oculto)
+        self.btn_delete_selected_shortcuts = QPushButton('🗑 Excluir Selecionados')
+        self.btn_delete_selected_shortcuts.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #82414c;
+                border: none;
+                padding: 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(130, 65, 76, 0.1);
+            }
+        """)
+        self.btn_delete_selected_shortcuts.clicked.connect(self.delete_selected_shortcuts)
+        self.btn_delete_selected_shortcuts.hide()
+        top_buttons.addWidget(self.btn_delete_selected_shortcuts)
+        
+        top_buttons.addStretch()
+        self.content_layout.addLayout(top_buttons)
         
         line = QWidget()
         line.setFixedHeight(1)
@@ -1125,6 +1263,9 @@ class MainMenu(QWidget):
         self.content_layout.addWidget(line)
         
         shortcuts = self.db.get_shortcuts()
+        
+        # Lista para armazenar checkboxes selecionados
+        self.selected_shortcuts = []
         
         if shortcuts:
             for shortcut in shortcuts:
@@ -1141,9 +1282,33 @@ class MainMenu(QWidget):
                 shortcut_layout.setContentsMargins(12, 10, 12, 10)
                 shortcut_layout.setSpacing(4)
                 
-                # Primeira linha: Nome e Toggle
+                # Primeira linha: Checkbox, Nome e Toggle
                 first_line = QHBoxLayout()
                 first_line.setSpacing(8)
+                
+                # Checkbox para seleção
+                checkbox = QCheckBox()
+                checkbox.setStyleSheet("""
+                    QCheckBox {
+                        spacing: 8px;
+                    }
+                    QCheckBox::indicator {
+                        width: 20px;
+                        height: 20px;
+                        border: 2px solid #888;
+                        border-radius: 3px;
+                        background-color: white;
+                    }
+                    QCheckBox::indicator:hover {
+                        border: 2px solid #88c22b;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #88c22b;
+                        border: 2px solid #88c22b;
+                    }
+                """)
+                checkbox.stateChanged.connect(lambda state, sid=shortcut['id']: self.on_shortcut_selection_changed(sid, state))
+                first_line.addWidget(checkbox)
                 
                 nome_label = QLabel(shortcut['nome'])
                 nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
@@ -1262,6 +1427,62 @@ class MainMenu(QWidget):
             self.content_layout.addWidget(empty_label)
         
         self.content_layout.addStretch()
+    
+    def on_shortcut_selection_changed(self, shortcut_id, state):
+        """Callback quando checkbox de atalho é alterado"""
+        if state == Qt.CheckState.Checked.value:
+            if shortcut_id not in self.selected_shortcuts:
+                self.selected_shortcuts.append(shortcut_id)
+        else:
+            if shortcut_id in self.selected_shortcuts:
+                self.selected_shortcuts.remove(shortcut_id)
+        
+        # Mostrar/ocultar botão de deletar selecionados
+        if len(self.selected_shortcuts) > 0:
+            self.btn_delete_selected_shortcuts.show()
+        else:
+            self.btn_delete_selected_shortcuts.hide()
+    
+    def delete_selected_shortcuts(self):
+        """Deletar atalhos selecionados"""
+        if not self.selected_shortcuts:
+            return
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar exclusão')
+        msg.setText(f'Deseja realmente excluir {len(self.selected_shortcuts)} atalho(s)?')
+        
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        msg.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QMessageBox QLabel {
+                color: #2d2d2d;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 4px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
+        
+        msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
+            for shortcut_id in self.selected_shortcuts:
+                self.db.delete_shortcut(shortcut_id)
+            self.selected_shortcuts.clear()
+            self.show_atalhos_tab()
     
     def add_shortcut(self):
         print("MainMenu: Abrindo janela de adicionar atalho")
@@ -1391,6 +1612,682 @@ class MainMenu(QWidget):
         event.accept()
 
 
+class EditableActionsList(QWidget):
+    """Widget de lista de ações com edição, exclusão e reordenação por drag-and-drop"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.acoes = []
+        self.action_widgets = []
+        self.dragged_widget = None
+        self.drag_start_index = -1
+        self.placeholder_widget = None
+        self.placeholder_index = -1
+        
+        self.init_ui()
+    
+    def init_ui(self):
+        self.main_layout = QVBoxLayout()
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(5)
+        
+        # Scroll area para as ações
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: white;
+            }
+        """)
+        
+        self.actions_container = QWidget()
+        self.actions_layout = QVBoxLayout()
+        self.actions_layout.setContentsMargins(5, 5, 5, 5)
+        self.actions_layout.setSpacing(5)
+        self.actions_container.setLayout(self.actions_layout)
+        
+        scroll.setWidget(self.actions_container)
+        
+        self.main_layout.addWidget(scroll)
+        self.setLayout(self.main_layout)
+        
+        self.setMinimumHeight(200)
+    
+    def add_acao(self, acao):
+        """Adicionar nova ação"""
+        self.acoes.append(acao)
+        self.refresh_list()
+    
+    def set_acoes(self, acoes):
+        """Definir lista completa de ações"""
+        self.acoes = acoes.copy()
+        self.refresh_list()
+    
+    def get_acoes(self):
+        """Retornar lista de ações"""
+        return self.acoes.copy()
+    
+    def refresh_list(self):
+        """Atualizar visualização da lista"""
+        # Limpar widgets anteriores
+        while self.actions_layout.count():
+            child = self.actions_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        self.action_widgets.clear()
+        
+        # Criar widget para cada ação
+        for i, acao in enumerate(self.acoes):
+            action_widget = ActionItemWidget(i, acao, self)
+            self.actions_layout.addWidget(action_widget)
+            self.action_widgets.append(action_widget)
+        
+        self.actions_layout.addStretch()
+    
+    def edit_acao(self, index):
+        """Editar ação no índice especificado"""
+        if 0 <= index < len(self.acoes):
+            acao = self.acoes[index]
+            
+            if acao['type'] == 'type':
+                self.edit_type_action(index, acao)
+            elif acao['type'] == 'click':
+                self.edit_click_action(index, acao)
+            elif acao['type'] == 'right_click':
+                self.edit_right_click_action(index, acao)
+            elif acao['type'] == 'drag':
+                self.edit_drag_action(index, acao)
+            elif acao['type'] == 'sleep':
+                self.edit_sleep_action(index, acao)
+    
+    def edit_type_action(self, index, acao):
+        """Editar ação de digitar"""
+        from PyQt6.QtWidgets import QInputDialog
+        texto, ok = QInputDialog.getText(
+            self, 
+            'Editar Texto', 
+            'Texto para digitar:',
+            text=acao['text']
+        )
+        if ok and texto:
+            self.acoes[index]['text'] = texto
+            self.refresh_list()
+    
+    def edit_click_action(self, index, acao):
+        """Editar ação de clique"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QHBoxLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Editar Clique')
+        dialog.setFixedWidth(300)
+        
+        layout = QVBoxLayout()
+        
+        # Número de cliques
+        layout.addWidget(QLabel('Quantos cliques?'))
+        spin_vezes = QSpinBox()
+        spin_vezes.setMinimum(1)
+        spin_vezes.setMaximum(100)
+        spin_vezes.setValue(acao.get('vezes', 1))
+        layout.addWidget(spin_vezes)
+        
+        # Posição X
+        pos_layout = QHBoxLayout()
+        pos_layout.addWidget(QLabel('X:'))
+        spin_x = QSpinBox()
+        spin_x.setMinimum(0)
+        spin_x.setMaximum(10000)
+        spin_x.setValue(acao['x'])
+        pos_layout.addWidget(spin_x)
+        
+        # Posição Y
+        pos_layout.addWidget(QLabel('Y:'))
+        spin_y = QSpinBox()
+        spin_y.setMinimum(0)
+        spin_y.setMaximum(10000)
+        spin_y.setValue(acao['y'])
+        pos_layout.addWidget(spin_y)
+        
+        layout.addLayout(pos_layout)
+        
+        # Botão para recapturar posição
+        btn_recapture = QPushButton('📍 Recapturar Posição')
+        btn_recapture.clicked.connect(lambda: self.recapture_position(dialog, spin_x, spin_y))
+        layout.addWidget(btn_recapture)
+        
+        # Botões
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.acoes[index]['vezes'] = spin_vezes.value()
+            self.acoes[index]['x'] = spin_x.value()
+            self.acoes[index]['y'] = spin_y.value()
+            self.refresh_list()
+    
+    def edit_right_click_action(self, index, acao):
+        """Editar ação de clique direito"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QHBoxLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Editar Clique Direito')
+        dialog.setFixedWidth(300)
+        
+        layout = QVBoxLayout()
+        
+        # Posição X
+        pos_layout = QHBoxLayout()
+        pos_layout.addWidget(QLabel('X:'))
+        spin_x = QSpinBox()
+        spin_x.setMinimum(0)
+        spin_x.setMaximum(10000)
+        spin_x.setValue(acao['x'])
+        pos_layout.addWidget(spin_x)
+        
+        # Posição Y
+        pos_layout.addWidget(QLabel('Y:'))
+        spin_y = QSpinBox()
+        spin_y.setMinimum(0)
+        spin_y.setMaximum(10000)
+        spin_y.setValue(acao['y'])
+        pos_layout.addWidget(spin_y)
+        
+        layout.addLayout(pos_layout)
+        
+        # Botão para recapturar posição
+        btn_recapture = QPushButton('📍 Recapturar Posição')
+        btn_recapture.clicked.connect(lambda: self.recapture_position(dialog, spin_x, spin_y))
+        layout.addWidget(btn_recapture)
+        
+        # Botões
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.acoes[index]['x'] = spin_x.value()
+            self.acoes[index]['y'] = spin_y.value()
+            self.refresh_list()
+    
+    def edit_drag_action(self, index, acao):
+        """Editar ação de arrastar"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QHBoxLayout, QGroupBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Editar Arraste')
+        dialog.setFixedWidth(300)
+        
+        layout = QVBoxLayout()
+        
+        # Posição inicial
+        group_inicio = QGroupBox('Posição Inicial')
+        inicio_layout = QHBoxLayout()
+        inicio_layout.addWidget(QLabel('X:'))
+        spin_x1 = QSpinBox()
+        spin_x1.setMinimum(0)
+        spin_x1.setMaximum(10000)
+        spin_x1.setValue(acao['x1'])
+        inicio_layout.addWidget(spin_x1)
+        
+        inicio_layout.addWidget(QLabel('Y:'))
+        spin_y1 = QSpinBox()
+        spin_y1.setMinimum(0)
+        spin_y1.setMaximum(10000)
+        spin_y1.setValue(acao['y1'])
+        inicio_layout.addWidget(spin_y1)
+        group_inicio.setLayout(inicio_layout)
+        layout.addWidget(group_inicio)
+        
+        # Posição final
+        group_fim = QGroupBox('Posição Final')
+        fim_layout = QHBoxLayout()
+        fim_layout.addWidget(QLabel('X:'))
+        spin_x2 = QSpinBox()
+        spin_x2.setMinimum(0)
+        spin_x2.setMaximum(10000)
+        spin_x2.setValue(acao['x2'])
+        fim_layout.addWidget(spin_x2)
+        
+        fim_layout.addWidget(QLabel('Y:'))
+        spin_y2 = QSpinBox()
+        spin_y2.setMinimum(0)
+        spin_y2.setMaximum(10000)
+        spin_y2.setValue(acao['y2'])
+        fim_layout.addWidget(spin_y2)
+        group_fim.setLayout(fim_layout)
+        layout.addWidget(group_fim)
+        
+        # Botão para recapturar
+        btn_recapture = QPushButton('📍 Recapturar Arraste')
+        btn_recapture.clicked.connect(lambda: self.recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2))
+        layout.addWidget(btn_recapture)
+        
+        # Botões
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.acoes[index]['x1'] = spin_x1.value()
+            self.acoes[index]['y1'] = spin_y1.value()
+            self.acoes[index]['x2'] = spin_x2.value()
+            self.acoes[index]['y2'] = spin_y2.value()
+            self.refresh_list()
+    
+    def edit_sleep_action(self, index, acao):
+        """Editar ação de espera"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Editar Espera')
+        dialog.setFixedWidth(300)
+        
+        layout = QVBoxLayout()
+        
+        layout.addWidget(QLabel('Tempo em milissegundos:'))
+        
+        spinbox = QSpinBox()
+        spinbox.setMinimum(100)
+        spinbox.setMaximum(60000)
+        spinbox.setValue(acao['ms'])
+        spinbox.setSingleStep(100)
+        layout.addWidget(spinbox)
+        
+        # Label de descrição
+        desc_label = QLabel('')
+        desc_label.setStyleSheet('color: #666; font-size: 11px; font-style: italic;')
+        layout.addWidget(desc_label)
+        
+        # Atualizar descrição quando valor muda
+        def update_desc(value):
+            segundos = value / 1000.0
+            if segundos == 1.0:
+                desc_label.setText('1000ms = 1 segundo')
+            else:
+                desc_label.setText(f'{value}ms = {segundos:.1f} segundos')
+        
+        spinbox.valueChanged.connect(update_desc)
+        update_desc(acao['ms'])
+        
+        # Botões
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.acoes[index]['ms'] = spinbox.value()
+            self.refresh_list()
+    
+    def recapture_position(self, dialog, spin_x, spin_y):
+        """Recapturar posição do mouse"""
+        dialog.hide()
+        # Minimizar janela principal também
+        if self.parent_window:
+            self.parent_window.showMinimized()
+        
+        overlay = ClickCaptureOverlay()
+        overlay.coordinate_captured.connect(lambda x, y: self.on_recapture_position(dialog, spin_x, spin_y, x, y))
+        overlay.showFullScreen()
+    
+    def on_recapture_position(self, dialog, spin_x, spin_y, x, y):
+        """Callback após recapturar posição"""
+        spin_x.setValue(int(x))
+        spin_y.setValue(int(y))
+        
+        # Restaurar janela principal
+        if self.parent_window:
+            self.parent_window.showNormal()
+            self.parent_window.raise_()
+            self.parent_window.activateWindow()
+        
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+    
+    def recapture_drag(self, dialog, spin_x1, spin_y1, spin_x2, spin_y2):
+        """Recapturar arraste"""
+        dialog.hide()
+        # Minimizar janela principal também
+        if self.parent_window:
+            self.parent_window.showMinimized()
+        
+        overlay = DragCaptureOverlay()
+        overlay.drag_captured.connect(lambda x1, y1, x2, y2: self.on_recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2, x1, y1, x2, y2))
+        overlay.showFullScreen()
+    
+    def on_recapture_drag(self, dialog, spin_x1, spin_y1, spin_x2, spin_y2, x1, y1, x2, y2):
+        """Callback após recapturar arraste"""
+        spin_x1.setValue(x1)
+        spin_y1.setValue(y1)
+        spin_x2.setValue(x2)
+        spin_y2.setValue(y2)
+        
+        # Restaurar janela principal
+        if self.parent_window:
+            self.parent_window.showNormal()
+            self.parent_window.raise_()
+            self.parent_window.activateWindow()
+        
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+    
+    def delete_acao(self, index):
+        """Deletar ação"""
+        if 0 <= index < len(self.acoes):
+            del self.acoes[index]
+            self.refresh_list()
+    
+    def move_acao(self, from_index, to_index):
+        """Mover ação de uma posição para outra"""
+        if 0 <= from_index < len(self.acoes) and 0 <= to_index < len(self.acoes):
+            acao = self.acoes.pop(from_index)
+            self.acoes.insert(to_index, acao)
+            self.refresh_list()
+    
+    def create_placeholder(self):
+        """Criar widget placeholder para mostrar onde o item será solto"""
+        placeholder = QWidget()
+        placeholder.setStyleSheet("""
+            QWidget {
+                background-color: rgba(136, 194, 43, 0.3);
+                border: 2px dashed #88c22b;
+                border-radius: 6px;
+            }
+        """)
+        placeholder.setMinimumHeight(45)
+        return placeholder
+    
+    def show_placeholder_at(self, index):
+        """Mostrar placeholder na posição especificada"""
+        # Remover placeholder anterior se existir
+        if self.placeholder_widget:
+            self.actions_layout.removeWidget(self.placeholder_widget)
+            self.placeholder_widget.deleteLater()
+            self.placeholder_widget = None
+        
+        # Criar novo placeholder
+        if 0 <= index <= len(self.action_widgets):
+            self.placeholder_widget = self.create_placeholder()
+            self.actions_layout.insertWidget(index, self.placeholder_widget)
+            self.placeholder_index = index
+    
+    def remove_placeholder(self):
+        """Remover placeholder"""
+        if self.placeholder_widget:
+            self.actions_layout.removeWidget(self.placeholder_widget)
+            self.placeholder_widget.deleteLater()
+            self.placeholder_widget = None
+            self.placeholder_index = -1
+
+
+class ActionItemWidget(QWidget):
+    """Widget individual para cada ação na lista"""
+    
+    def __init__(self, index, acao, parent_list):
+        super().__init__()
+        self.index = index
+        self.acao = acao
+        self.parent_list = parent_list
+        self.drag_start_pos = None
+        
+        self.init_ui()
+    
+    def init_ui(self):
+        self.setAcceptDrops(True)  # Habilitar drop
+        self.setMouseTracking(True)  # Habilitar tracking do mouse
+        
+        self.setStyleSheet("""
+            ActionItemWidget {
+                background-color: #ffffff;
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
+            }
+            ActionItemWidget:hover {
+                background-color: #f8f9fa;
+                border: 2px solid #88c22b;
+            }
+        """)
+        
+        layout = QHBoxLayout()
+        layout.setContentsMargins(10, 8, 10, 8)
+        
+        # Ícone de arrastar
+        drag_icon = QLabel('☰')
+        drag_icon.setStyleSheet('color: #999; font-size: 16px; font-weight: bold;')
+        drag_icon.setCursor(Qt.CursorShape.SizeAllCursor)
+        layout.addWidget(drag_icon)
+        
+        # Texto da ação
+        texto = self.get_action_text()
+        self.label = QLabel(texto)
+        self.label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500;')
+        layout.addWidget(self.label, stretch=1)
+        
+        # Botões de ação (inicialmente ocultos)
+        self.btn_edit = QPushButton('✏')
+        self.btn_edit.setFixedSize(24, 24)
+        self.btn_edit.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #406e54;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgba(64, 110, 84, 0.15);
+            }
+        """)
+        self.btn_edit.clicked.connect(self.on_edit_clicked)
+        self.btn_edit.hide()
+        layout.addWidget(self.btn_edit)
+        
+        self.btn_delete = QPushButton('🗑')
+        self.btn_delete.setFixedSize(24, 24)
+        self.btn_delete.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #82414c;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgba(130, 65, 76, 0.15);
+            }
+        """)
+        self.btn_delete.clicked.connect(self.on_delete_clicked)
+        self.btn_delete.hide()
+        layout.addWidget(self.btn_delete)
+        
+        self.setLayout(layout)
+        self.setMinimumHeight(45)
+    
+    def get_action_text(self):
+        """Obter texto descritivo da ação"""
+        acao = self.acao
+        i = self.index
+        
+        if acao['type'] == 'click':
+            vezes = acao.get('vezes', 1)
+            if vezes == 1:
+                return f"{i+1}. Clique em ({acao['x']}, {acao['y']})"
+            else:
+                return f"{i+1}. Clique {vezes}x em ({acao['x']}, {acao['y']})"
+        elif acao['type'] == 'right_click':
+            return f"{i+1}. Clique direito em ({acao['x']}, {acao['y']})"
+        elif acao['type'] == 'drag':
+            return f"{i+1}. Arrastar de ({acao['x1']}, {acao['y1']}) até ({acao['x2']}, {acao['y2']})"
+        elif acao['type'] == 'sleep':
+            segundos = acao['ms'] / 1000.0
+            return f"{i+1}. Esperar {acao['ms']}ms ({segundos:.1f}s)"
+        elif acao['type'] == 'type':
+            preview = acao['text'][:30] + '...' if len(acao['text']) > 30 else acao['text']
+            return f"{i+1}. Digitar: {preview}"
+        return f"{i+1}. Ação desconhecida"
+    
+    def enterEvent(self, event):
+        """Mostrar botões ao passar mouse"""
+        self.btn_edit.show()
+        self.btn_delete.show()
+    
+    def leaveEvent(self, event):
+        """Ocultar botões ao sair mouse"""
+        self.btn_edit.hide()
+        self.btn_delete.hide()
+    
+    def on_edit_clicked(self):
+        """Callback botão editar"""
+        self.parent_list.edit_acao(self.index)
+    
+    def on_delete_clicked(self):
+        """Callback botão deletar"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar exclusão')
+        msg.setText('Deseja realmente excluir esta ação?')
+        
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
+            self.parent_list.delete_acao(self.index)
+    
+    def mousePressEvent(self, event):
+        """Iniciar drag"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_start_pos = event.pos()
+    
+    def mouseMoveEvent(self, event):
+        """Realizar drag and drop com preview visual simples"""
+        if not self.drag_start_pos:
+            return
+        
+        if (event.pos() - self.drag_start_pos).manhattanLength() < 10:
+            return
+        
+        # Iniciar drag
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setText(str(self.index))
+        drag.setMimeData(mime_data)
+        
+        # Visual feedback simples - imagem do widget
+        pixmap = self.grab()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(event.pos())
+        
+        # Executar drag
+        drag.exec(Qt.DropAction.MoveAction)
+        
+        # Limpar placeholder
+        self.parent_list.remove_placeholder()
+        self.drag_start_pos = None
+    
+    def dragEnterEvent(self, event):
+        """Aceitar drag e mostrar preview"""
+        if event.mimeData().hasText():
+            event.accept()
+            from_index = int(event.mimeData().text())
+            
+            # Mostrar placeholder na posição atual
+            if from_index != self.index:
+                self.parent_list.show_placeholder_at(self.index)
+    
+    def dragMoveEvent(self, event):
+        """Atualizar preview durante movimento"""
+        if event.mimeData().hasText():
+            event.accept()
+            from_index = int(event.mimeData().text())
+            
+            if from_index == self.index:
+                # Se é o mesmo item, não mostrar placeholder
+                self.parent_list.remove_placeholder()
+                return
+            
+            # Atualizar posição do placeholder baseado na posição do mouse
+            # Se mouse está na metade superior, placeholder vai antes
+            # Se está na metade inferior, placeholder vai depois
+            widget_rect = self.rect()
+            mouse_y = event.position().y()
+            
+            if mouse_y < widget_rect.height() / 2:
+                # Placeholder antes deste item
+                target_index = self.index
+            else:
+                # Placeholder depois deste item
+                target_index = self.index + 1
+            
+            # Ajustar se estamos movendo de cima para baixo
+            if from_index < target_index:
+                target_index -= 1
+            
+            self.parent_list.show_placeholder_at(target_index)
+    
+    def dragLeaveEvent(self, event):
+        """Remover preview ao sair"""
+        # Não remover placeholder ao sair, apenas ao drop ou cancelar
+        pass
+    
+    def dropEvent(self, event):
+        """Processar drop"""
+        if not event.mimeData().hasText():
+            return
+        
+        from_index = int(event.mimeData().text())
+        
+        # Usar a posição do placeholder como destino
+        to_index = self.parent_list.placeholder_index
+        
+        # Se não há placeholder, usar posição atual
+        if to_index == -1:
+            widget_rect = self.rect()
+            mouse_y = event.position().y()
+            
+            if mouse_y < widget_rect.height() / 2:
+                to_index = self.index
+            else:
+                to_index = self.index + 1
+            
+            # Ajustar se movendo de cima para baixo
+            if from_index < to_index:
+                to_index -= 1
+        
+        # Mover apenas se for diferente
+        if from_index != to_index and to_index >= 0:
+            self.parent_list.move_acao(from_index, to_index)
+        
+        # Limpar placeholder
+        self.parent_list.remove_placeholder()
+        
+        event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        """Limpar estado ao soltar mouse"""
+        self.drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+
 class AddShortcutWindow(QWidget):
     def __init__(self, db, menu_ref=None, shortcut_data=None):
         print("AddShortcutWindow: __init__ chamado")
@@ -1455,19 +2352,13 @@ class AddShortcutWindow(QWidget):
         
         layout.addWidget(QLabel('Ações:'))
         
-        # Lista de ações
-        self.acoes_list = QListWidget()
-        self.acoes_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-        """)
+        # Lista de ações customizada com drag-and-drop
+        self.acoes_list = EditableActionsList(self)
         layout.addWidget(self.acoes_list)
         
         # Atualizar lista se estiver editando
         if self.acoes:
-            self.update_acoes_list()
+            self.acoes_list.set_acoes(self.acoes)
         
         # Botões para adicionar ações
         acoes_buttons = QHBoxLayout()
@@ -1476,15 +2367,28 @@ class AddShortcutWindow(QWidget):
         btn_click.clicked.connect(self.add_click_action)
         acoes_buttons.addWidget(btn_click)
         
+        btn_right_click = QPushButton('+ Clique Direito')
+        btn_right_click.clicked.connect(self.add_right_click_action)
+        acoes_buttons.addWidget(btn_right_click)
+        
+        btn_drag = QPushButton('+ Arrastar')
+        btn_drag.clicked.connect(self.add_drag_action)
+        acoes_buttons.addWidget(btn_drag)
+        
+        layout.addLayout(acoes_buttons)
+        
+        # Segunda linha de botões
+        acoes_buttons2 = QHBoxLayout()
+        
         btn_type = QPushButton('+ Digitar')
         btn_type.clicked.connect(self.add_type_action)
-        acoes_buttons.addWidget(btn_type)
+        acoes_buttons2.addWidget(btn_type)
         
         btn_sleep = QPushButton('+ Esperar')
         btn_sleep.clicked.connect(self.add_sleep_action)
-        acoes_buttons.addWidget(btn_sleep)
+        acoes_buttons2.addWidget(btn_sleep)
         
-        layout.addLayout(acoes_buttons)
+        layout.addLayout(acoes_buttons2)
         
         # Botões finais
         btn_layout = QHBoxLayout()
@@ -1523,8 +2427,7 @@ class AddShortcutWindow(QWidget):
         from PyQt6.QtWidgets import QInputDialog
         texto, ok = QInputDialog.getText(self, 'Digitar texto', 'Texto para digitar:')
         if ok and texto:
-            self.acoes.append({'type': 'type', 'text': texto})
-            self.update_acoes_list()
+            self.acoes_list.add_acao({'type': 'type', 'text': texto})
     
     def add_click_action(self):
         # Perguntar quantos cliques
@@ -1533,14 +2436,56 @@ class AddShortcutWindow(QWidget):
         if not ok:
             return
         
+        # Minimizar janela antes de capturar
+        self.showMinimized()
+        
         # Criar overlay escuro para capturar clique
         self.overlay = ClickCaptureOverlay()
         self.overlay.coordinate_captured.connect(lambda x, y: self.on_coordinate_captured(x, y, vezes))
         self.overlay.showFullScreen()
     
+    def add_right_click_action(self):
+        """Adicionar ação de clique com botão direito"""
+        # Minimizar janela antes de capturar
+        self.showMinimized()
+        
+        # Criar overlay escuro para capturar clique
+        self.overlay = ClickCaptureOverlay(button_type='right')
+        self.overlay.coordinate_captured.connect(self.on_right_click_captured)
+        self.overlay.showFullScreen()
+    
+    def add_drag_action(self):
+        """Adicionar ação de arrastar mouse"""
+        # Minimizar janela antes de capturar
+        self.showMinimized()
+        
+        # Criar overlay escuro para capturar início e fim do arraste
+        self.overlay = DragCaptureOverlay()
+        self.overlay.drag_captured.connect(self.on_drag_captured)
+        self.overlay.showFullScreen()
+    
     def on_coordinate_captured(self, x, y, vezes=1):
-        self.acoes.append({'type': 'click', 'x': x, 'y': y, 'vezes': vezes})
-        self.update_acoes_list()
+        self.acoes_list.add_acao({'type': 'click', 'x': x, 'y': y, 'vezes': vezes})
+        # Restaurar janela
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+    
+    def on_right_click_captured(self, x, y):
+        """Callback quando clique direito é capturado"""
+        self.acoes_list.add_acao({'type': 'right_click', 'x': x, 'y': y})
+        # Restaurar janela
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+    
+    def on_drag_captured(self, x1, y1, x2, y2):
+        """Callback quando arraste é capturado"""
+        self.acoes_list.add_acao({'type': 'drag', 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
+        # Restaurar janela
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
     
     def add_sleep_action(self):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
@@ -1585,25 +2530,8 @@ class AddShortcutWindow(QWidget):
         dialog.setLayout(layout)
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.acoes.append({'type': 'sleep', 'ms': spinbox.value()})
-            self.update_acoes_list()
+            self.acoes_list.add_acao({'type': 'sleep', 'ms': spinbox.value()})
     
-    def update_acoes_list(self):
-        self.acoes_list.clear()
-        for i, acao in enumerate(self.acoes):
-            if acao['type'] == 'click':
-                vezes = acao.get('vezes', 1)
-                if vezes == 1:
-                    texto = f"{i+1}. Clique em ({acao['x']}, {acao['y']})"
-                else:
-                    texto = f"{i+1}. Clique {vezes}x em ({acao['x']}, {acao['y']})"
-            elif acao['type'] == 'sleep':
-                segundos = acao['ms'] / 1000.0
-                texto = f"{i+1}. Esperar {acao['ms']}ms ({segundos:.1f}s)"
-            elif acao['type'] == 'type':
-                preview = acao['text'][:30] + '...' if len(acao['text']) > 30 else acao['text']
-                texto = f"{i+1}. Digitar: {preview}"
-            self.acoes_list.addItem(texto)
     
     def salvar(self):
         nome = self.nome_input.text().strip()
@@ -1626,17 +2554,20 @@ class AddShortcutWindow(QWidget):
             # Atalho de texto
             tecla_atalho = tecla_input.lower()  # Normalizar para minúscula
         
-        if len(self.acoes) == 0:
+        # Obter ações da lista
+        acoes = self.acoes_list.get_acoes()
+        
+        if len(acoes) == 0:
             QMessageBox.warning(self, 'Erro', 'Adicione pelo menos uma ação!')
             return
         
         if self.shortcut_id:
             # Editando
-            self.db.update_shortcut(self.shortcut_id, nome, self.acoes, tecla_atalho)
+            self.db.update_shortcut(self.shortcut_id, nome, acoes, tecla_atalho)
             msg = 'Atalho atualizado!'
         else:
             # Criando novo
-            self.db.add_shortcut(nome, self.acoes, tecla_atalho)
+            self.db.add_shortcut(nome, acoes, tecla_atalho)
             msg = 'Atalho salvo!'
         
         notification = NotificationWidget(f'✓ {msg}')
@@ -1656,8 +2587,9 @@ class AddShortcutWindow(QWidget):
 class ClickCaptureOverlay(QWidget):
     coordinate_captured = pyqtSignal(int, int)
     
-    def __init__(self):
+    def __init__(self, button_type='left'):
         super().__init__()
+        self.button_type = button_type
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -1672,8 +2604,11 @@ class ClickCaptureOverlay(QWidget):
         
         # Desenhar instruções
         painter.setPen(QColor(255, 255, 255))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 
-                        "Clique onde deseja que o atalho clique\nESC para cancelar")
+        if self.button_type == 'right':
+            texto = "Clique onde deseja que o atalho clique com botão DIREITO\nESC para cancelar"
+        else:
+            texto = "Clique onde deseja que o atalho clique\nESC para cancelar"
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, texto)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1681,6 +2616,73 @@ class ClickCaptureOverlay(QWidget):
             y = event.globalPosition().y()
             self.coordinate_captured.emit(int(x), int(y))
             self.close()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+
+
+class DragCaptureOverlay(QWidget):
+    drag_captured = pyqtSignal(int, int, int, int)
+    
+    def __init__(self):
+        super().__init__()
+        self.start_pos = None
+        self.current_pos = None
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))  # Escuro semi-transparente
+        
+        # Desenhar instruções
+        painter.setPen(QColor(255, 255, 255))
+        if not self.start_pos:
+            texto = "Clique no ponto INICIAL do arraste\nESC para cancelar"
+        else:
+            texto = "Clique no ponto FINAL do arraste\nESC para cancelar"
+        
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, texto)
+        
+        # Se já tem ponto inicial, desenhar linha até o mouse
+        if self.start_pos and self.current_pos:
+            painter.setPen(QColor(136, 194, 43, 255))  # Verde
+            painter.drawLine(self.start_pos, self.current_pos)
+            
+            # Desenhar círculos nos pontos
+            painter.setBrush(QColor(136, 194, 43, 255))
+            painter.drawEllipse(self.start_pos, 5, 5)
+            painter.drawEllipse(self.current_pos, 5, 5)
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self.start_pos:
+                # Primeiro clique - ponto inicial
+                self.start_pos = event.pos()
+                self.update()
+            else:
+                # Segundo clique - ponto final
+                end_pos = event.pos()
+                
+                # Converter para coordenadas globais
+                x1 = int(self.start_pos.x())
+                y1 = int(self.start_pos.y())
+                x2 = int(end_pos.x())
+                y2 = int(end_pos.y())
+                
+                self.drag_captured.emit(x1, y1, x2, y2)
+                self.close()
+    
+    def mouseMoveEvent(self, event):
+        if self.start_pos:
+            self.current_pos = event.pos()
+            self.update()
     
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -1787,8 +2789,8 @@ class AddTemplateWindow(QWidget):
         self.notification.show()
         
         # Atualizar menu se estiver aberto (sem fechar nada)
-        if self.parent_menu and hasattr(self.parent_menu, 'show_templates_tab'):
-            QTimer.singleShot(100, self.parent_menu.show_templates_tab)
+        if self.menu_reference and hasattr(self.menu_reference, 'show_templates_tab'):
+            QTimer.singleShot(100, self.menu_reference.show_templates_tab)
         
         # Fechar janela por último
         self.close()
