@@ -6,3 +6,9 @@ que o sistema reconheça caso uma combinação de teclas já exista em outro ata
 limite de tres teclas para o comando de teclado
 poder adicionar observações em cada passo dos atalhos, para saber onde está clicando, etc.
 arrumar o mover das ações
+adicionar animações pra quando o circulo abrir, fechar e for movido
+criar um botão de confirgurações do lado de sair, onde posso desabilitar as animações se o computador for lento
+deixar os curculos menos espaçados
+o circulo fica tranlucido, com uma transparencia de 50% por exemplo, mas quando passa o mouse por ele, ai fica com 100%.
+arrumar quando o texto do template tiver quebra de linha, pois ele entende como enter, e se for um template do whatsapp, ele acaba enviando a mensagem ao invés de dar enter, então ele tem que apertar shift enter qnd tiver quebra de linha
+poder editar templates.

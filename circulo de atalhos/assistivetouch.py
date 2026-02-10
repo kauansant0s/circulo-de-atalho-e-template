@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QH
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
                               QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData
-from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag
+from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient
 from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
 from pynput.mouse import Button, Controller as MouseController
@@ -731,38 +731,53 @@ class FloatingCircle(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Criar widget container ao invés de usar botão
-        self.container = QWidget(self)
-        self.container.setFixedSize(60, 60)
-        self.container.setStyleSheet("""
-            QWidget {
-                background-color: rgba(100, 100, 100, 180);
-                border-radius: 30px;
-            }
-            QWidget:hover {
-                background-color: rgba(80, 80, 80, 200);
-            }
-        """)
-        
-        # Label com ícone
-        label = QLabel('⚙', self.container)
-        label.setStyleSheet("color: white; font-size: 24px; background: transparent;")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setGeometry(0, 0, 60, 60)
-        
-        layout = QVBoxLayout()
-        layout.addWidget(self.container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.setLayout(layout)
-        
-        self.setFixedSize(60, 60)
+        self.setFixedSize(80, 80)
         
         position = self.db.get_position()
         if position:
             self.move(position[0], position[1])
         else:
             screen = QApplication.primaryScreen().geometry()
-            self.move(screen.width() - 100, screen.height() // 2)
+            self.move(screen.width() - 120, screen.height() // 2)
+    
+    def paintEvent(self, event):
+        """Desenhar o círculo com anéis concêntricos"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        
+        # Fundo externo gradiente (sombra suave)
+        gradient = QRadialGradient(center_x, center_y, 40)
+        gradient.setColorAt(0, QColor(60, 60, 60, 150))
+        gradient.setColorAt(0.7, QColor(40, 40, 40, 100))
+        gradient.setColorAt(1, QColor(0, 0, 0, 0))
+        painter.setBrush(gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(0, 0, 80, 80)
+        
+        # Anel externo (cinza escuro)
+        painter.setPen(QPen(QColor(80, 80, 80), 3))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(8, 8, 64, 64)
+        
+        # Anel médio (cinza médio)
+        painter.setPen(QPen(QColor(120, 120, 120), 2.5))
+        painter.drawEllipse(14, 14, 52, 52)
+        
+        # Anel interno (cinza claro)
+        painter.setPen(QPen(QColor(160, 160, 160), 2))
+        painter.drawEllipse(19, 19, 42, 42)
+        
+        # Centro branco
+        gradient_center = QRadialGradient(center_x, center_y, 18)
+        gradient_center.setColorAt(0, QColor(255, 255, 255, 255))
+        gradient_center.setColorAt(0.8, QColor(240, 240, 240, 255))
+        gradient_center.setColorAt(1, QColor(220, 220, 220, 255))
+        painter.setBrush(gradient_center)
+        painter.setPen(QPen(QColor(180, 180, 180), 1))
+        painter.drawEllipse(22, 22, 36, 36)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1625,6 +1640,11 @@ class EditableActionsList(QWidget):
         self.placeholder_widget = None
         self.placeholder_index = -1
         
+        # Estado de reorganização visual durante drag
+        self.is_dragging = False
+        self.drag_from_index = -1
+        self.drag_hover_index = -1
+        
         self.init_ui()
     
     def init_ui(self):
@@ -1645,6 +1665,7 @@ class EditableActionsList(QWidget):
         """)
         
         self.actions_container = QWidget()
+        self.actions_container.setAcceptDrops(True)  # Habilitar drops no container
         self.actions_layout = QVBoxLayout()
         self.actions_layout.setContentsMargins(5, 5, 5, 5)
         self.actions_layout.setSpacing(5)
@@ -1998,10 +2019,23 @@ class EditableActionsList(QWidget):
     
     def move_acao(self, from_index, to_index):
         """Mover ação de uma posição para outra"""
-        if 0 <= from_index < len(self.acoes) and 0 <= to_index < len(self.acoes):
-            acao = self.acoes.pop(from_index)
-            self.acoes.insert(to_index, acao)
-            self.refresh_list()
+        if not (0 <= from_index < len(self.acoes)):
+            return
+        
+        if not (0 <= to_index < len(self.acoes)):
+            return
+        
+        if from_index == to_index:
+            return
+        
+        # Remover item da posição original
+        acao = self.acoes.pop(from_index)
+        
+        # Inserir na nova posição
+        self.acoes.insert(to_index, acao)
+        
+        # Atualizar visualização
+        self.refresh_list()
     
     def create_placeholder(self):
         """Criar widget placeholder para mostrar onde o item será solto"""
@@ -2037,6 +2071,40 @@ class EditableActionsList(QWidget):
             self.placeholder_widget.deleteLater()
             self.placeholder_widget = None
             self.placeholder_index = -1
+    
+    def reorder_visual_for_drag(self, from_index, hover_index):
+        """Reorganizar visualmente os widgets enquanto arrasta"""
+        if from_index == hover_index or hover_index == -1:
+            return
+        
+        # Criar lista temporária da ordem visual desejada
+        temp_order = list(range(len(self.action_widgets)))
+        
+        # Remover item da posição original
+        item = temp_order.pop(from_index)
+        
+        # Inserir na posição de hover
+        temp_order.insert(hover_index, item)
+        
+        # Reorganizar widgets no layout seguindo a nova ordem
+        for visual_pos, actual_index in enumerate(temp_order):
+            widget = self.action_widgets[actual_index]
+            # Remove e reinsere na nova posição visual
+            self.actions_layout.removeWidget(widget)
+            self.actions_layout.insertWidget(visual_pos, widget)
+    
+    def restore_visual_order(self):
+        """Restaurar ordem visual original dos widgets"""
+        for i, widget in enumerate(self.action_widgets):
+            self.actions_layout.removeWidget(widget)
+            self.actions_layout.insertWidget(i, widget)
+    
+    def cancel_drag(self):
+        """Cancelar drag e restaurar tudo ao estado original"""
+        self.is_dragging = False
+        self.drag_from_index = -1
+        self.drag_hover_index = -1
+        self.restore_visual_order()
 
 
 class ActionItemWidget(QWidget):
@@ -2177,14 +2245,22 @@ class ActionItemWidget(QWidget):
         """Iniciar drag"""
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_start_pos = event.pos()
+            event.accept()
     
     def mouseMoveEvent(self, event):
-        """Realizar drag and drop com preview visual simples"""
+        """Realizar drag and drop"""
         if not self.drag_start_pos:
+            return
+        
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
             return
         
         if (event.pos() - self.drag_start_pos).manhattanLength() < 10:
             return
+        
+        # Marcar que drag começou
+        self.parent_list.is_dragging = True
+        self.parent_list.drag_from_index = self.index
         
         # Iniciar drag
         drag = QDrag(self)
@@ -2192,100 +2268,110 @@ class ActionItemWidget(QWidget):
         mime_data.setText(str(self.index))
         drag.setMimeData(mime_data)
         
-        # Visual feedback simples - imagem do widget
+        # Visual feedback - imagem semi-transparente
         pixmap = self.grab()
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        painter.fillRect(pixmap.rect(), QColor(0, 0, 0, 120))
+        painter.end()
+        
         drag.setPixmap(pixmap)
         drag.setHotSpot(event.pos())
         
-        # Executar drag
-        drag.exec(Qt.DropAction.MoveAction)
+        # Esconder widget original durante drag
+        self.setStyleSheet("""
+            ActionItemWidget {
+                background-color: transparent;
+                border: 2px dashed #ccc;
+                border-radius: 6px;
+            }
+        """)
         
-        # Limpar placeholder
-        self.parent_list.remove_placeholder()
+        # Executar drag
+        result = drag.exec(Qt.DropAction.MoveAction)
+        
+        # Resetar estado
+        self.parent_list.is_dragging = False
+        self.parent_list.drag_from_index = -1
+        self.parent_list.drag_hover_index = -1
+        
+        # Se drag foi cancelado (result == 0), restaurar ordem original
+        if result == Qt.DropAction.IgnoreAction:
+            self.parent_list.restore_visual_order()
+            # Também precisa atualizar a lista completa para garantir
+            self.parent_list.refresh_list()
+        
         self.drag_start_pos = None
     
     def dragEnterEvent(self, event):
-        """Aceitar drag e mostrar preview"""
+        """Aceitar drag e iniciar reorganização visual"""
         if event.mimeData().hasText():
-            event.accept()
             from_index = int(event.mimeData().text())
             
-            # Mostrar placeholder na posição atual
-            if from_index != self.index:
-                self.parent_list.show_placeholder_at(self.index)
+            if from_index != self.index and self.parent_list.is_dragging:
+                # Reorganizar visualmente
+                self.parent_list.drag_hover_index = self.index
+                self.parent_list.reorder_visual_for_drag(from_index, self.index)
+            
+            event.acceptProposedAction()
     
     def dragMoveEvent(self, event):
-        """Atualizar preview durante movimento"""
+        """Atualizar reorganização visual durante movimento"""
         if event.mimeData().hasText():
-            event.accept()
             from_index = int(event.mimeData().text())
             
-            if from_index == self.index:
-                # Se é o mesmo item, não mostrar placeholder
-                self.parent_list.remove_placeholder()
-                return
+            if from_index != self.index and self.parent_list.is_dragging:
+                # Atualizar hover index
+                if self.parent_list.drag_hover_index != self.index:
+                    self.parent_list.drag_hover_index = self.index
+                    self.parent_list.reorder_visual_for_drag(from_index, self.index)
             
-            # Atualizar posição do placeholder baseado na posição do mouse
-            # Se mouse está na metade superior, placeholder vai antes
-            # Se está na metade inferior, placeholder vai depois
-            widget_rect = self.rect()
-            mouse_y = event.position().y()
-            
-            if mouse_y < widget_rect.height() / 2:
-                # Placeholder antes deste item
-                target_index = self.index
-            else:
-                # Placeholder depois deste item
-                target_index = self.index + 1
-            
-            # Ajustar se estamos movendo de cima para baixo
-            if from_index < target_index:
-                target_index -= 1
-            
-            self.parent_list.show_placeholder_at(target_index)
+            event.acceptProposedAction()
     
     def dragLeaveEvent(self, event):
-        """Remover preview ao sair"""
-        # Não remover placeholder ao sair, apenas ao drop ou cancelar
+        """Nada a fazer ao sair - a reorganização visual permanece"""
         pass
     
     def dropEvent(self, event):
         """Processar drop"""
         if not event.mimeData().hasText():
+            # Drag cancelado - restaurar ordem visual
+            self.parent_list.restore_visual_order()
+            self.parent_list.refresh_list()
+            event.ignore()
             return
         
         from_index = int(event.mimeData().text())
         
-        # Usar a posição do placeholder como destino
-        to_index = self.parent_list.placeholder_index
-        
-        # Se não há placeholder, usar posição atual
+        # Usar hover index se disponível
+        to_index = self.parent_list.drag_hover_index
         if to_index == -1:
-            widget_rect = self.rect()
-            mouse_y = event.position().y()
-            
-            if mouse_y < widget_rect.height() / 2:
-                to_index = self.index
-            else:
-                to_index = self.index + 1
-            
-            # Ajustar se movendo de cima para baixo
-            if from_index < to_index:
-                to_index -= 1
+            to_index = self.index
         
-        # Mover apenas se for diferente
-        if from_index != to_index and to_index >= 0:
+        # Restaurar aparência
+        self.init_ui()
+        
+        # Sempre restaurar ordem visual primeiro
+        self.parent_list.restore_visual_order()
+        
+        if from_index != to_index:
+            # Mover item na lista real de ações
             self.parent_list.move_acao(from_index, to_index)
-        
-        # Limpar placeholder
-        self.parent_list.remove_placeholder()
-        
-        event.accept()
+            event.acceptProposedAction()
+        else:
+            # Mesmo índice - apenas atualizar para garantir ordem correta
+            self.parent_list.refresh_list()
+            event.acceptProposedAction()
     
     def mouseReleaseEvent(self, event):
-        """Limpar estado ao soltar mouse"""
-        self.drag_start_pos = None
-        super().mouseReleaseEvent(event)
+        """Limpar estado ao soltar mouse - pode ser cancelamento"""
+        if self.drag_start_pos:
+            # Se ainda tem drag_start_pos, significa que o drag foi muito curto ou cancelado
+            self.drag_start_pos = None
+            if self.parent_list.is_dragging:
+                self.parent_list.cancel_drag()
+                self.init_ui()  # Restaurar aparência
+        event.accept()
 
 
 class AddShortcutWindow(QWidget):
