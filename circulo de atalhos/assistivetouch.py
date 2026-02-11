@@ -147,6 +147,13 @@ class Database:
         cursor.execute('DELETE FROM templates WHERE id = ?', (id,))
         self.conn.commit()
     
+    def update_template(self, id, nome, texto, atalho=None):
+        """Atualizar template existente"""
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE templates SET nome = ?, texto = ?, atalho = ? WHERE id = ?', 
+                      (nome, texto, atalho, id))
+        self.conn.commit()
+    
     # Métodos para Shortcuts
     def add_shortcut(self, nome, acoes, tecla_atalho=None):
         cursor = self.conn.cursor()
@@ -733,12 +740,12 @@ class FloatingCircle(QWidget):
         
         self.setFixedSize(80, 80)
         
-        position = self.db.get_position()
-        if position:
-            self.move(position[0], position[1])
-        else:
-            screen = QApplication.primaryScreen().geometry()
-            self.move(screen.width() - 120, screen.height() // 2)
+        # SEMPRE iniciar no canto superior direito (ignorar posição salva)
+        screen = QApplication.primaryScreen().geometry()
+        # Posição: 20px da borda direita, 20px do topo
+        x = screen.width() - 100  # 80px do círculo + 20px de margem
+        y = 20
+        self.move(x, y)
     
     def paintEvent(self, event):
         """Desenhar o círculo com anéis concêntricos"""
@@ -800,9 +807,10 @@ class FloatingCircle(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.dragging:
-                # Foi arraste - salvar posição
-                pos = self.pos()
-                self.db.save_position(pos.x(), pos.y())
+                # Foi arraste - posição não é mais salva, sempre reinicia no canto
+                # pos = self.pos()
+                # self.db.save_position(pos.x(), pos.y())
+                pass
             else:
                 # Foi clique - abrir menu
                 self.show_menu()
@@ -1066,8 +1074,27 @@ class MainMenu(QWidget):
                 nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
                 first_line.addWidget(nome_label, stretch=1)
                 
+                # Botão editar
+                btn_edit = QPushButton('✎')  # Lápis mais clean
+                btn_edit.setFixedSize(24, 24)
+                btn_edit.setStyleSheet("""
+                    QPushButton {
+                        background-color: transparent;
+                        color: #406e54;
+                        border: none;
+                        border-radius: 4px;
+                        font-size: 16px;
+                        padding: 0px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(64, 110, 84, 0.15);
+                    }
+                """)
+                btn_edit.clicked.connect(lambda checked, tid=template[0], tnome=template[1], ttexto=template[2], tatalho=template[3]: self.edit_template(tid, tnome, ttexto, tatalho))
+                first_line.addWidget(btn_edit)
+                
                 # Botão deletar pequeno
-                btn_delete = QPushButton('🗑')
+                btn_delete = QPushButton('🗑')  # Lixeira
                 btn_delete.setFixedSize(24, 24)
                 btn_delete.setStyleSheet("""
                     QPushButton {
@@ -1200,6 +1227,17 @@ class MainMenu(QWidget):
         if msg.clickedButton() == btn_sim:
             self.db.delete_template(template_id)
             self.show_templates_tab()
+    
+    def edit_template(self, template_id, nome, texto, atalho):
+        """Abrir janela para editar template existente"""
+        print(f"Editando template {template_id}")
+        if self.add_window and self.add_window.isVisible():
+            self.add_window.close()
+        
+        self.add_window = EditTemplateWindow(self.db, menu_ref=self, template_id=template_id, nome=nome, texto=texto, atalho=atalho)
+        self.add_window.show()
+        self.add_window.raise_()
+        self.add_window.activateWindow()
     
     def show_atalhos_tab(self):
         while self.content_layout.count():
@@ -1396,7 +1434,7 @@ class MainMenu(QWidget):
                 buttons_layout = QHBoxLayout()
                 buttons_layout.setSpacing(5)
                 
-                btn_edit = QPushButton('✏ Editar')
+                btn_edit = QPushButton('✎ Editar')
                 btn_edit.setStyleSheet("""
                     QPushButton {
                         background-color: transparent;
@@ -2151,7 +2189,7 @@ class ActionItemWidget(QWidget):
         layout.addWidget(self.label, stretch=1)
         
         # Botões de ação (inicialmente ocultos)
-        self.btn_edit = QPushButton('✏')
+        self.btn_edit = QPushButton('✎')
         self.btn_edit.setFixedSize(24, 24)
         self.btn_edit.setStyleSheet("""
             QPushButton {
@@ -2159,7 +2197,7 @@ class ActionItemWidget(QWidget):
                 color: #406e54;
                 border: none;
                 border-radius: 4px;
-                font-size: 14px;
+                font-size: 16px;
             }
             QPushButton:hover {
                 background-color: rgba(64, 110, 84, 0.15);
@@ -2879,6 +2917,108 @@ class AddTemplateWindow(QWidget):
             QTimer.singleShot(100, self.menu_reference.show_templates_tab)
         
         # Fechar janela por último
+        self.close()
+
+
+class EditTemplateWindow(QWidget):
+    """Janela para editar template existente"""
+    def __init__(self, db, menu_ref=None, template_id=None, nome='', texto='', atalho=''):
+        super().__init__(None)
+        
+        self.db = db
+        self.menu_reference = menu_ref
+        self.template_id = template_id
+        
+        # Janela completamente independente
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        
+        self.init_ui(nome, texto, atalho)
+    
+    def closeEvent(self, event):
+        # Limpar referências
+        self.menu_reference = None
+        event.accept()
+    
+    def init_ui(self, nome, texto, atalho):
+        self.setWindowTitle('Editar Template')
+        self.setFixedSize(500, 400)
+        
+        layout = QVBoxLayout()
+        
+        title = QLabel('Editar Template')
+        title.setStyleSheet('font-weight: bold; font-size: 15px; padding: 10px;')
+        layout.addWidget(title)
+        
+        layout.addWidget(QLabel('Nome do template:'))
+        self.nome_input = QLineEdit()
+        self.nome_input.setText(nome)
+        self.nome_input.setPlaceholderText('Ex: Saudação formal')
+        layout.addWidget(self.nome_input)
+        
+        layout.addWidget(QLabel('Texto do template:'))
+        self.texto_input = QTextEdit()
+        self.texto_input.setPlainText(texto)
+        self.texto_input.setPlaceholderText('Digite o texto que será inserido...')
+        layout.addWidget(self.texto_input)
+        
+        layout.addWidget(QLabel('Atalho de texto (opcional):'))
+        info_label = QLabel('💡 Digite o atalho e pressione ESPAÇO para expandir (ex: "otb" + espaço)')
+        info_label.setStyleSheet('color: #666; font-size: 11px;')
+        layout.addWidget(info_label)
+        
+        self.atalho_input = QLineEdit()
+        self.atalho_input.setText(atalho if atalho else '')
+        self.atalho_input.setPlaceholderText('Ex: otb, abs, obg')
+        layout.addWidget(self.atalho_input)
+        
+        btn_layout = QHBoxLayout()
+        
+        btn_salvar = QPushButton('✓ Salvar')
+        btn_salvar.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        btn_salvar.clicked.connect(self.salvar)
+        btn_layout.addWidget(btn_salvar)
+        
+        btn_cancelar = QPushButton('✗ Cancelar')
+        btn_cancelar.clicked.connect(self.close)
+        btn_layout.addWidget(btn_cancelar)
+        
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+    
+    def salvar(self):
+        nome = self.nome_input.text().strip()
+        texto = self.texto_input.toPlainText().strip()
+        atalho = self.atalho_input.text().strip() or None
+        
+        if not nome or not texto:
+            QMessageBox.warning(self, 'Erro', 'Preencha pelo menos o nome e o texto!')
+            return
+        
+        # Atualizar template no banco
+        self.db.update_template(self.template_id, nome, texto, atalho)
+        
+        # Mostrar notificação
+        self.notification = NotificationWidget('✓ Template atualizado!')
+        self.notification.show()
+        
+        # Atualizar menu se estiver aberto
+        if self.menu_reference and hasattr(self.menu_reference, 'show_templates_tab'):
+            QTimer.singleShot(100, self.menu_reference.show_templates_tab)
+        
+        # Fechar janela
         self.close()
 
 
