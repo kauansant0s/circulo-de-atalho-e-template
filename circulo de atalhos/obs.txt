@@ -7,8 +7,16 @@ limite de tres teclas para o comando de teclado
 poder adicionar observações em cada passo dos atalhos, para saber onde está clicando, etc.
 arrumar o mover das ações
 adicionar animações pra quando o circulo abrir, fechar e for movido
-criar um botão de confirgurações do lado de sair, onde posso desabilitar as animações se o computador for lento
 deixar os curculos menos espaçados
 o circulo fica tranlucido, com uma transparencia de 50% por exemplo, mas quando passa o mouse por ele, ai fica com 100%.
-arrumar quando o texto do template tiver quebra de linha, pois ele entende como enter, e se for um template do whatsapp, ele acaba enviando a mensagem ao invés de dar enter, então ele tem que apertar shift enter qnd tiver quebra de linha
-poder editar templates.
+quando clica em recapturar ele só minimiza a janela, mas não aparece para eu recapturar
+quando eu abro o circulo, quero que abra na mesma janela em q parei qnd fechei, se quando o circulo foi fechado estava em atalhos, qnd abrir ele de novo, vai abrir em atalhos,  vice-cersa
+qnd eu excluo algo e abre a janela de confirmação, quero q n feche a janela do circulo, e dps q eu confirmar, ele só volta pra onde eu tava
+tirar o botão de clicar com o botão direito, qnd clicar para adicionar um clique, abre a janelinha para escolher quantos clique e com qual botão tbm.
+arrumar problemas de mover por setas, quando move pra baixo ele buga e fecha
+ele n edita qnd clica em recapturar ajuste
+
+criar um botão de confirgurações do lado de sair, onde posso:
+desabilitar as animações se o computador for lento
+alterar o modo de mover as ações (setas ou drag and drop) (o drag and drop de antes estava funcionando, eu que ratiei)
+redimensionar tamanho e translucidez do circulo

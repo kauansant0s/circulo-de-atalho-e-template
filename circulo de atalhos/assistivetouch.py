@@ -260,7 +260,7 @@ class KeyboardListener:
             
             # Se estiver no modo de busca
             if self.search_mode:
-                if key == Key.right:
+                if key == Key.right or key == Key.enter:
                     if self.templates_popup:
                         current_item = self.templates_popup.list_widget.currentItem()
                         if current_item:
@@ -404,8 +404,17 @@ class KeyboardListener:
                 
                 time.sleep(0.05)
                 
-                # Digitar
-                self.keyboard_controller.type(texto)
+                # Digitar com Shift+Enter para quebras de linha
+                for linha in texto.split('\n'):
+                    if linha:  # Se a linha não está vazia
+                        self.keyboard_controller.type(linha)
+                    # Pressionar Shift+Enter para quebra de linha (exceto na última linha)
+                    if linha != texto.split('\n')[-1] or texto.endswith('\n'):
+                        with self.keyboard_controller.pressed(Key.shift):
+                            self.keyboard_controller.press(Key.enter)
+                            self.keyboard_controller.release(Key.enter)
+                        time.sleep(0.05)
+                
                 print("Concluído!")
                 
             except Exception as e:
@@ -447,7 +456,19 @@ class KeyboardListener:
                         time.sleep(0.01)
                     
                     time.sleep(0.05)
-                    self.keyboard_controller.type(template[2])
+                    
+                    # Digitar com Shift+Enter para quebras de linha
+                    texto = template[2]
+                    for linha in texto.split('\n'):
+                        if linha:  # Se a linha não está vazia
+                            self.keyboard_controller.type(linha)
+                        # Pressionar Shift+Enter para quebra de linha (exceto na última linha)
+                        if linha != texto.split('\n')[-1] or texto.endswith('\n'):
+                            with self.keyboard_controller.pressed(Key.shift):
+                                self.keyboard_controller.press(Key.enter)
+                                self.keyboard_controller.release(Key.enter)
+                            time.sleep(0.05)
+                    
                     return
         
         # Verificar shortcuts com atalho de texto
@@ -544,7 +565,17 @@ class KeyboardListener:
                         self.mouse_controller.release(Button.left)
                         
                     elif acao['type'] == 'type':
-                        self.keyboard_controller.type(acao['text'])
+                        # Digitar texto, usando Shift+Enter para quebras de linha
+                        texto = acao['text']
+                        for linha in texto.split('\n'):
+                            if linha:  # Se a linha não está vazia
+                                self.keyboard_controller.type(linha)
+                            # Pressionar Shift+Enter para quebra de linha (exceto na última linha)
+                            if linha != texto.split('\n')[-1] or texto.endswith('\n'):
+                                with self.keyboard_controller.pressed(Key.shift):
+                                    self.keyboard_controller.press(Key.enter)
+                                    self.keyboard_controller.release(Key.enter)
+                                time.sleep(0.05)
                         
                     elif acao['type'] == 'sleep':
                         time.sleep(acao['ms'] / 1000.0)
@@ -1075,15 +1106,16 @@ class MainMenu(QWidget):
                 first_line.addWidget(nome_label, stretch=1)
                 
                 # Botão editar
-                btn_edit = QPushButton('✎')  # Lápis mais clean
-                btn_edit.setFixedSize(24, 24)
+                btn_edit = QPushButton('✎')  # Edit icon
+                btn_edit.setFixedSize(26, 26)
                 btn_edit.setStyleSheet("""
                     QPushButton {
                         background-color: transparent;
                         color: #406e54;
                         border: none;
                         border-radius: 4px;
-                        font-size: 16px;
+                        font-size: 18px;
+                        font-weight: normal;
                         padding: 0px;
                     }
                     QPushButton:hover {
@@ -1093,8 +1125,9 @@ class MainMenu(QWidget):
                 btn_edit.clicked.connect(lambda checked, tid=template[0], tnome=template[1], ttexto=template[2], tatalho=template[3]: self.edit_template(tid, tnome, ttexto, tatalho))
                 first_line.addWidget(btn_edit)
                 
-                # Botão deletar pequeno
-                btn_delete = QPushButton('🗑')  # Lixeira
+                # Botão deletar pequeno  
+                btn_delete = QPushButton('🗑')  # Delete icon
+                btn_delete.setFixedSize(26, 26)
                 btn_delete.setFixedSize(24, 24)
                 btn_delete.setStyleSheet("""
                     QPushButton {
@@ -1795,27 +1828,36 @@ class EditableActionsList(QWidget):
         spin_vezes.setValue(acao.get('vezes', 1))
         layout.addWidget(spin_vezes)
         
-        # Posição X
-        pos_layout = QHBoxLayout()
-        pos_layout.addWidget(QLabel('X:'))
+        # Posição atual (apenas exibição)
+        layout.addWidget(QLabel(f'\nPosição atual: ({acao["x"]}, {acao["y"]})'))
+        
+        # Spinboxes ocultos apenas para armazenar valores
         spin_x = QSpinBox()
         spin_x.setMinimum(0)
         spin_x.setMaximum(10000)
         spin_x.setValue(acao['x'])
-        pos_layout.addWidget(spin_x)
+        spin_x.hide()
         
-        # Posição Y
-        pos_layout.addWidget(QLabel('Y:'))
         spin_y = QSpinBox()
         spin_y.setMinimum(0)
         spin_y.setMaximum(10000)
         spin_y.setValue(acao['y'])
-        pos_layout.addWidget(spin_y)
-        
-        layout.addLayout(pos_layout)
+        spin_y.hide()
         
         # Botão para recapturar posição
         btn_recapture = QPushButton('📍 Recapturar Posição')
+        btn_recapture.setStyleSheet("""
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
         btn_recapture.clicked.connect(lambda: self.recapture_position(dialog, spin_x, spin_y))
         layout.addWidget(btn_recapture)
         
@@ -1835,7 +1877,7 @@ class EditableActionsList(QWidget):
     
     def edit_right_click_action(self, index, acao):
         """Editar ação de clique direito"""
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QHBoxLayout
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
         
         dialog = QDialog(self)
         dialog.setWindowTitle('Editar Clique Direito')
@@ -1843,27 +1885,36 @@ class EditableActionsList(QWidget):
         
         layout = QVBoxLayout()
         
-        # Posição X
-        pos_layout = QHBoxLayout()
-        pos_layout.addWidget(QLabel('X:'))
+        # Posição atual (apenas exibição)
+        layout.addWidget(QLabel(f'Posição atual: ({acao["x"]}, {acao["y"]})'))
+        
+        # Spinboxes ocultos apenas para armazenar valores
         spin_x = QSpinBox()
         spin_x.setMinimum(0)
         spin_x.setMaximum(10000)
         spin_x.setValue(acao['x'])
-        pos_layout.addWidget(spin_x)
+        spin_x.hide()
         
-        # Posição Y
-        pos_layout.addWidget(QLabel('Y:'))
         spin_y = QSpinBox()
         spin_y.setMinimum(0)
         spin_y.setMaximum(10000)
         spin_y.setValue(acao['y'])
-        pos_layout.addWidget(spin_y)
-        
-        layout.addLayout(pos_layout)
+        spin_y.hide()
         
         # Botão para recapturar posição
         btn_recapture = QPushButton('📍 Recapturar Posição')
+        btn_recapture.setStyleSheet("""
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
         btn_recapture.clicked.connect(lambda: self.recapture_position(dialog, spin_x, spin_y))
         layout.addWidget(btn_recapture)
         
@@ -1882,54 +1933,57 @@ class EditableActionsList(QWidget):
     
     def edit_drag_action(self, index, acao):
         """Editar ação de arrastar"""
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QHBoxLayout, QGroupBox
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
         
         dialog = QDialog(self)
         dialog.setWindowTitle('Editar Arraste')
-        dialog.setFixedWidth(300)
+        dialog.setFixedWidth(320)
         
         layout = QVBoxLayout()
         
-        # Posição inicial
-        group_inicio = QGroupBox('Posição Inicial')
-        inicio_layout = QHBoxLayout()
-        inicio_layout.addWidget(QLabel('X:'))
+        # Posições atuais (apenas exibição)
+        layout.addWidget(QLabel(f'Início: ({acao["x1"]}, {acao["y1"]})'))
+        layout.addWidget(QLabel(f'Fim: ({acao["x2"]}, {acao["y2"]})'))
+        
+        # Spinboxes ocultos apenas para armazenar valores
         spin_x1 = QSpinBox()
         spin_x1.setMinimum(0)
         spin_x1.setMaximum(10000)
         spin_x1.setValue(acao['x1'])
-        inicio_layout.addWidget(spin_x1)
+        spin_x1.hide()
         
-        inicio_layout.addWidget(QLabel('Y:'))
         spin_y1 = QSpinBox()
         spin_y1.setMinimum(0)
         spin_y1.setMaximum(10000)
         spin_y1.setValue(acao['y1'])
-        inicio_layout.addWidget(spin_y1)
-        group_inicio.setLayout(inicio_layout)
-        layout.addWidget(group_inicio)
+        spin_y1.hide()
         
-        # Posição final
-        group_fim = QGroupBox('Posição Final')
-        fim_layout = QHBoxLayout()
-        fim_layout.addWidget(QLabel('X:'))
         spin_x2 = QSpinBox()
         spin_x2.setMinimum(0)
         spin_x2.setMaximum(10000)
         spin_x2.setValue(acao['x2'])
-        fim_layout.addWidget(spin_x2)
+        spin_x2.hide()
         
-        fim_layout.addWidget(QLabel('Y:'))
         spin_y2 = QSpinBox()
         spin_y2.setMinimum(0)
         spin_y2.setMaximum(10000)
         spin_y2.setValue(acao['y2'])
-        fim_layout.addWidget(spin_y2)
-        group_fim.setLayout(fim_layout)
-        layout.addWidget(group_fim)
+        spin_y2.hide()
         
         # Botão para recapturar
         btn_recapture = QPushButton('📍 Recapturar Arraste')
+        btn_recapture.setStyleSheet("""
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
         btn_recapture.clicked.connect(lambda: self.recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2))
         layout.addWidget(btn_recapture)
         
@@ -2002,9 +2056,9 @@ class EditableActionsList(QWidget):
         if self.parent_window:
             self.parent_window.showMinimized()
         
-        overlay = ClickCaptureOverlay()
-        overlay.coordinate_captured.connect(lambda x, y: self.on_recapture_position(dialog, spin_x, spin_y, x, y))
-        overlay.showFullScreen()
+        self.recapture_overlay = ClickCaptureOverlay()
+        self.recapture_overlay.coordinate_captured.connect(lambda x, y: self.on_recapture_position(dialog, spin_x, spin_y, x, y))
+        self.recapture_overlay.showFullScreen()
     
     def on_recapture_position(self, dialog, spin_x, spin_y, x, y):
         """Callback após recapturar posição"""
@@ -2020,6 +2074,9 @@ class EditableActionsList(QWidget):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        
+        # Limpar overlay
+        self.recapture_overlay = None
     
     def recapture_drag(self, dialog, spin_x1, spin_y1, spin_x2, spin_y2):
         """Recapturar arraste"""
@@ -2028,9 +2085,9 @@ class EditableActionsList(QWidget):
         if self.parent_window:
             self.parent_window.showMinimized()
         
-        overlay = DragCaptureOverlay()
-        overlay.drag_captured.connect(lambda x1, y1, x2, y2: self.on_recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2, x1, y1, x2, y2))
-        overlay.showFullScreen()
+        self.recapture_overlay = DragCaptureOverlay()
+        self.recapture_overlay.drag_captured.connect(lambda x1, y1, x2, y2: self.on_recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2, x1, y1, x2, y2))
+        self.recapture_overlay.showFullScreen()
     
     def on_recapture_drag(self, dialog, spin_x1, spin_y1, spin_x2, spin_y2, x1, y1, x2, y2):
         """Callback após recapturar arraste"""
@@ -2045,6 +2102,12 @@ class EditableActionsList(QWidget):
             self.parent_window.raise_()
             self.parent_window.activateWindow()
         
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        
+        # Limpar overlay
+        self.recapture_overlay = None
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -2153,14 +2216,10 @@ class ActionItemWidget(QWidget):
         self.index = index
         self.acao = acao
         self.parent_list = parent_list
-        self.drag_start_pos = None
         
         self.init_ui()
     
     def init_ui(self):
-        self.setAcceptDrops(True)  # Habilitar drop
-        self.setMouseTracking(True)  # Habilitar tracking do mouse
-        
         self.setStyleSheet("""
             ActionItemWidget {
                 background-color: #ffffff;
@@ -2176,11 +2235,58 @@ class ActionItemWidget(QWidget):
         layout = QHBoxLayout()
         layout.setContentsMargins(10, 8, 10, 8)
         
-        # Ícone de arrastar
-        drag_icon = QLabel('☰')
-        drag_icon.setStyleSheet('color: #999; font-size: 16px; font-weight: bold;')
-        drag_icon.setCursor(Qt.CursorShape.SizeAllCursor)
-        layout.addWidget(drag_icon)
+        # Botões de mover para cima/baixo
+        move_layout = QVBoxLayout()
+        move_layout.setSpacing(0)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+        
+        btn_up = QPushButton('▲')
+        btn_up.setFixedSize(20, 20)
+        btn_up.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #666;
+                border: none;
+                font-size: 10px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #88c22b;
+                background-color: rgba(136, 194, 43, 0.1);
+            }
+            QPushButton:disabled {
+                color: #ccc;
+            }
+        """)
+        btn_up.clicked.connect(self.move_up)
+        if self.index == 0:
+            btn_up.setEnabled(False)
+        move_layout.addWidget(btn_up)
+        
+        btn_down = QPushButton('▼')
+        btn_down.setFixedSize(20, 20)
+        btn_down.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #666;
+                border: none;
+                font-size: 10px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #88c22b;
+                background-color: rgba(136, 194, 43, 0.1);
+            }
+            QPushButton:disabled {
+                color: #ccc;
+            }
+        """)
+        btn_down.clicked.connect(self.move_down)
+        if self.index == len(self.parent_list.acoes) - 1:
+            btn_down.setEnabled(False)
+        move_layout.addWidget(btn_down)
+        
+        layout.addLayout(move_layout)
         
         # Texto da ação
         texto = self.get_action_text()
@@ -2279,85 +2385,15 @@ class ActionItemWidget(QWidget):
         if msg.clickedButton() == btn_sim:
             self.parent_list.delete_acao(self.index)
     
-    def mousePressEvent(self, event):
-        """Iniciar drag"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_start_pos = event.pos()
-            event.accept()
+    def move_up(self):
+        """Mover ação para cima (uma posição)"""
+        if self.index > 0:
+            self.parent_list.move_acao(self.index, self.index - 1)
     
-    def mouseMoveEvent(self, event):
-        """Realizar drag and drop"""
-        if not self.drag_start_pos:
-            return
-        
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            return
-        
-        if (event.pos() - self.drag_start_pos).manhattanLength() < 10:
-            return
-        
-        # Marcar que drag começou
-        self.parent_list.is_dragging = True
-        self.parent_list.drag_from_index = self.index
-        
-        # Iniciar drag
-        drag = QDrag(self)
-        mime_data = QMimeData()
-        mime_data.setText(str(self.index))
-        drag.setMimeData(mime_data)
-        
-        # Visual feedback - imagem semi-transparente
-        pixmap = self.grab()
-        painter = QPainter(pixmap)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-        painter.fillRect(pixmap.rect(), QColor(0, 0, 0, 120))
-        painter.end()
-        
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(event.pos())
-        
-        # Esconder widget original durante drag
-        self.setStyleSheet("""
-            ActionItemWidget {
-                background-color: transparent;
-                border: 2px dashed #ccc;
-                border-radius: 6px;
-            }
-        """)
-        
-        # Executar drag
-        result = drag.exec(Qt.DropAction.MoveAction)
-        
-        # Resetar estado
-        self.parent_list.is_dragging = False
-        self.parent_list.drag_from_index = -1
-        self.parent_list.drag_hover_index = -1
-        
-        # Se drag foi cancelado (result == 0), restaurar ordem original
-        if result == Qt.DropAction.IgnoreAction:
-            self.parent_list.restore_visual_order()
-            # Também precisa atualizar a lista completa para garantir
-            self.parent_list.refresh_list()
-        
-        self.drag_start_pos = None
-    
-    def dragEnterEvent(self, event):
-        """Aceitar drag e iniciar reorganização visual"""
-        if event.mimeData().hasText():
-            from_index = int(event.mimeData().text())
-            
-            if from_index != self.index and self.parent_list.is_dragging:
-                # Reorganizar visualmente
-                self.parent_list.drag_hover_index = self.index
-                self.parent_list.reorder_visual_for_drag(from_index, self.index)
-            
-            event.acceptProposedAction()
-    
-    def dragMoveEvent(self, event):
-        """Atualizar reorganização visual durante movimento"""
-        if event.mimeData().hasText():
-            from_index = int(event.mimeData().text())
-            
+    def move_down(self):
+        """Mover ação para baixo (uma posição)"""
+        if self.index < len(self.parent_list.acoes) - 1:
+            self.parent_list.move_acao(self.index, self.index + 1)
             if from_index != self.index and self.parent_list.is_dragging:
                 # Atualizar hover index
                 if self.parent_list.drag_hover_index != self.index:
@@ -2366,50 +2402,6 @@ class ActionItemWidget(QWidget):
             
             event.acceptProposedAction()
     
-    def dragLeaveEvent(self, event):
-        """Nada a fazer ao sair - a reorganização visual permanece"""
-        pass
-    
-    def dropEvent(self, event):
-        """Processar drop"""
-        if not event.mimeData().hasText():
-            # Drag cancelado - restaurar ordem visual
-            self.parent_list.restore_visual_order()
-            self.parent_list.refresh_list()
-            event.ignore()
-            return
-        
-        from_index = int(event.mimeData().text())
-        
-        # Usar hover index se disponível
-        to_index = self.parent_list.drag_hover_index
-        if to_index == -1:
-            to_index = self.index
-        
-        # Restaurar aparência
-        self.init_ui()
-        
-        # Sempre restaurar ordem visual primeiro
-        self.parent_list.restore_visual_order()
-        
-        if from_index != to_index:
-            # Mover item na lista real de ações
-            self.parent_list.move_acao(from_index, to_index)
-            event.acceptProposedAction()
-        else:
-            # Mesmo índice - apenas atualizar para garantir ordem correta
-            self.parent_list.refresh_list()
-            event.acceptProposedAction()
-    
-    def mouseReleaseEvent(self, event):
-        """Limpar estado ao soltar mouse - pode ser cancelamento"""
-        if self.drag_start_pos:
-            # Se ainda tem drag_start_pos, significa que o drag foi muito curto ou cancelado
-            self.drag_start_pos = None
-            if self.parent_list.is_dragging:
-                self.parent_list.cancel_drag()
-                self.init_ui()  # Restaurar aparência
-        event.accept()
 
 
 class AddShortcutWindow(QWidget):
@@ -2752,7 +2744,8 @@ class DragCaptureOverlay(QWidget):
     def __init__(self):
         super().__init__()
         self.start_pos = None
-        self.current_pos = None
+        self.end_pos = None
+        self.is_dragging = False
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -2767,46 +2760,51 @@ class DragCaptureOverlay(QWidget):
         
         # Desenhar instruções
         painter.setPen(QColor(255, 255, 255))
-        if not self.start_pos:
-            texto = "Clique no ponto INICIAL do arraste\nESC para cancelar"
+        if not self.is_dragging:
+            texto = "Clique e SEGURE no ponto inicial, arraste até o ponto final e SOLTE\nESC para cancelar"
         else:
-            texto = "Clique no ponto FINAL do arraste\nESC para cancelar"
+            texto = "Arraste até o ponto final e SOLTE o botão\nESC para cancelar"
         
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, texto)
         
-        # Se já tem ponto inicial, desenhar linha até o mouse
-        if self.start_pos and self.current_pos:
-            painter.setPen(QColor(136, 194, 43, 255))  # Verde
-            painter.drawLine(self.start_pos, self.current_pos)
+        # Se está arrastando, desenhar linha em tempo real
+        if self.start_pos and self.end_pos:
+            painter.setPen(QPen(QColor(136, 194, 43, 255), 3))  # Verde, linha mais grossa
+            painter.drawLine(self.start_pos, self.end_pos)
             
             # Desenhar círculos nos pontos
             painter.setBrush(QColor(136, 194, 43, 255))
-            painter.drawEllipse(self.start_pos, 5, 5)
-            painter.drawEllipse(self.current_pos, 5, 5)
+            painter.drawEllipse(self.start_pos, 8, 8)
+            painter.setBrush(QColor(255, 194, 43, 255))  # Amarelo no final
+            painter.drawEllipse(self.end_pos, 8, 8)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if not self.start_pos:
-                # Primeiro clique - ponto inicial
-                self.start_pos = event.pos()
-                self.update()
-            else:
-                # Segundo clique - ponto final
-                end_pos = event.pos()
-                
-                # Converter para coordenadas globais
-                x1 = int(self.start_pos.x())
-                y1 = int(self.start_pos.y())
-                x2 = int(end_pos.x())
-                y2 = int(end_pos.y())
-                
-                self.drag_captured.emit(x1, y1, x2, y2)
-                self.close()
+            # Capturar ponto inicial
+            self.start_pos = event.pos()
+            self.end_pos = event.pos()
+            self.is_dragging = True
+            self.update()
     
     def mouseMoveEvent(self, event):
-        if self.start_pos:
-            self.current_pos = event.pos()
+        if self.is_dragging:
+            # Atualizar ponto final enquanto arrasta
+            self.end_pos = event.pos()
             self.update()
+    
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.is_dragging:
+            # Capturar ponto final ao soltar
+            self.end_pos = event.pos()
+            
+            # Converter para coordenadas de tela
+            x1 = int(self.start_pos.x())
+            y1 = int(self.start_pos.y())
+            x2 = int(self.end_pos.x())
+            y2 = int(self.end_pos.y())
+            
+            self.drag_captured.emit(x1, y1, x2, y2)
+            self.close()
     
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
