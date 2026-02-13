@@ -759,6 +759,7 @@ class FloatingCircle(QWidget):
         self.drag_start_position = QPoint()
         self.click_position = QPoint()
         self.menu = None
+        self.menu_open = False  # Controlar se menu está aberto
         self.init_ui()
     
     def init_ui(self):
@@ -770,6 +771,9 @@ class FloatingCircle(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         self.setFixedSize(80, 80)
+        
+        # Opacidade inicial: 60%
+        self.setWindowOpacity(0.6)
         
         # SEMPRE iniciar no canto superior direito (ignorar posição salva)
         screen = QApplication.primaryScreen().geometry()
@@ -859,6 +863,9 @@ class FloatingCircle(QWidget):
             print("Círculo: Menu já está aberto, fechando...")
             self.menu.close()
             self.menu = None
+            self.menu_open = False
+            # Voltar para 60% opacidade
+            self.setWindowOpacity(0.6)
             return
         
         # Caso contrário, abrir novo menu
@@ -867,15 +874,33 @@ class FloatingCircle(QWidget):
             self.menu.close()
         
         self.menu = MainMenu(self.db, self)
+        self.menu_open = True
+        # Menu aberto: 100% opacidade
+        self.setWindowOpacity(1.0)
         
-        # Conectar evento de fechar para limpar referência
-        self.menu.destroyed.connect(lambda: setattr(self, 'menu', None))
+        # Conectar evento de fechar para limpar referência e resetar opacidade
+        def on_menu_closed():
+            self.menu = None
+            self.menu_open = False
+            self.setWindowOpacity(0.6)
+        
+        self.menu.destroyed.connect(on_menu_closed)
         
         menu_x = self.x() - 360
         menu_y = self.y()
         self.menu.move(menu_x, menu_y)
         self.menu.show()
         print("Círculo: Menu mostrado")
+    
+    def enterEvent(self, event):
+        """Mouse entrou no círculo - aumentar opacidade"""
+        if not self.menu_open:
+            self.setWindowOpacity(1.0)
+    
+    def leaveEvent(self, event):
+        """Mouse saiu do círculo - voltar para opacidade normal"""
+        if not self.menu_open:
+            self.setWindowOpacity(0.6)
 
 
 class MainMenu(QWidget):
@@ -885,6 +910,13 @@ class MainMenu(QWidget):
         self.circle_parent = parent
         self.add_window = None  # Manter referência
         self.init_ui()
+    
+    def closeEvent(self, event):
+        """Ao fechar menu, resetar opacidade do círculo"""
+        if self.circle_parent:
+            self.circle_parent.menu_open = False
+            self.circle_parent.setWindowOpacity(0.6)
+        event.accept()
     
     def init_ui(self):
         self.setWindowFlags(
@@ -1227,7 +1259,7 @@ class MainMenu(QWidget):
             self.show_templates_tab()
     
     def delete_template(self, template_id):
-        msg = QMessageBox(self)
+        msg = QMessageBox()
         msg.setWindowTitle('Confirmar exclusão')
         msg.setText('Deseja realmente deletar este template?')
         
@@ -1255,11 +1287,16 @@ class MainMenu(QWidget):
             }
         """)
         
-        msg.exec()
+        result = msg.exec()
         
         if msg.clickedButton() == btn_sim:
             self.db.delete_template(template_id)
             self.show_templates_tab()
+        
+        # Reabrir menu
+        self.show()
+        self.raise_()
+        self.activateWindow()
     
     def edit_template(self, template_id, nome, texto, atalho):
         """Abrir janela para editar template existente"""
@@ -1591,7 +1628,7 @@ class MainMenu(QWidget):
         self.add_window.activateWindow()
     
     def delete_shortcut(self, shortcut_id):
-        msg = QMessageBox(self)
+        msg = QMessageBox()
         msg.setWindowTitle('Confirmar exclusão')
         msg.setText('Deseja realmente excluir este atalho?')
         
@@ -1619,11 +1656,16 @@ class MainMenu(QWidget):
             }
         """)
         
-        msg.exec()
+        result = msg.exec()
         
         if msg.clickedButton() == btn_sim:
             self.db.delete_shortcut(shortcut_id)
             self.show_atalhos_tab()
+        
+        # Reabrir menu
+        self.show()
+        self.raise_()
+        self.activateWindow()
     
     def toggle_shortcut_status(self, shortcut_id):
         self.db.toggle_shortcut(shortcut_id)
@@ -1788,10 +1830,8 @@ class EditableActionsList(QWidget):
             
             if acao['type'] == 'type':
                 self.edit_type_action(index, acao)
-            elif acao['type'] == 'click':
+            elif acao['type'] == 'click' or acao['type'] == 'right_click':
                 self.edit_click_action(index, acao)
-            elif acao['type'] == 'right_click':
-                self.edit_right_click_action(index, acao)
             elif acao['type'] == 'drag':
                 self.edit_drag_action(index, acao)
             elif acao['type'] == 'sleep':
@@ -1812,7 +1852,7 @@ class EditableActionsList(QWidget):
     
     def edit_click_action(self, index, acao):
         """Editar ação de clique"""
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QHBoxLayout
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QRadioButton, QButtonGroup
         
         dialog = QDialog(self)
         dialog.setWindowTitle('Editar Clique')
@@ -1820,16 +1860,36 @@ class EditableActionsList(QWidget):
         
         layout = QVBoxLayout()
         
-        # Número de cliques
-        layout.addWidget(QLabel('Quantos cliques?'))
+        # Tipo de botão
+        layout.addWidget(QLabel('Tipo de botão:'))
+        
+        btn_group = QButtonGroup(dialog)
+        radio_esquerdo = QRadioButton('Botão Esquerdo')
+        radio_direito = QRadioButton('Botão Direito')
+        
+        btn_group.addButton(radio_esquerdo)
+        btn_group.addButton(radio_direito)
+        
+        # Selecionar baseado no tipo atual
+        if acao['type'] == 'right_click':
+            radio_direito.setChecked(True)
+        else:
+            radio_esquerdo.setChecked(True)
+        
+        layout.addWidget(radio_esquerdo)
+        layout.addWidget(radio_direito)
+        
+        # Número de cliques (só para esquerdo)
+        layout.addWidget(QLabel('\nQuantos cliques?'))
         spin_vezes = QSpinBox()
         spin_vezes.setMinimum(1)
         spin_vezes.setMaximum(100)
         spin_vezes.setValue(acao.get('vezes', 1))
         layout.addWidget(spin_vezes)
         
-        # Posição atual (apenas exibição)
-        layout.addWidget(QLabel(f'\nPosição atual: ({acao["x"]}, {acao["y"]})'))
+        # Posição atual (label que será atualizado)
+        label_pos = QLabel(f'\nPosição atual: ({acao["x"]}, {acao["y"]})')
+        layout.addWidget(label_pos)
         
         # Spinboxes ocultos apenas para armazenar valores
         spin_x = QSpinBox()
@@ -1843,6 +1903,13 @@ class EditableActionsList(QWidget):
         spin_y.setMaximum(10000)
         spin_y.setValue(acao['y'])
         spin_y.hide()
+        
+        # Função para atualizar label quando spinbox muda
+        def update_label():
+            label_pos.setText(f'\nPosição atual: ({spin_x.value()}, {spin_y.value()})')
+        
+        spin_x.valueChanged.connect(update_label)
+        spin_y.valueChanged.connect(update_label)
         
         # Botão para recapturar posição
         btn_recapture = QPushButton('📍 Recapturar Posição')
@@ -1870,7 +1937,16 @@ class EditableActionsList(QWidget):
         dialog.setLayout(layout)
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.acoes[index]['vezes'] = spin_vezes.value()
+            # Atualizar tipo baseado no radio button
+            if radio_direito.isChecked():
+                self.acoes[index]['type'] = 'right_click'
+                # Remover vezes se for clique direito
+                if 'vezes' in self.acoes[index]:
+                    del self.acoes[index]['vezes']
+            else:
+                self.acoes[index]['type'] = 'click'
+                self.acoes[index]['vezes'] = spin_vezes.value()
+            
             self.acoes[index]['x'] = spin_x.value()
             self.acoes[index]['y'] = spin_y.value()
             self.refresh_list()
@@ -1885,8 +1961,9 @@ class EditableActionsList(QWidget):
         
         layout = QVBoxLayout()
         
-        # Posição atual (apenas exibição)
-        layout.addWidget(QLabel(f'Posição atual: ({acao["x"]}, {acao["y"]})'))
+        # Posição atual (label que será atualizado)
+        label_pos = QLabel(f'Posição atual: ({acao["x"]}, {acao["y"]})')
+        layout.addWidget(label_pos)
         
         # Spinboxes ocultos apenas para armazenar valores
         spin_x = QSpinBox()
@@ -1900,6 +1977,13 @@ class EditableActionsList(QWidget):
         spin_y.setMaximum(10000)
         spin_y.setValue(acao['y'])
         spin_y.hide()
+        
+        # Função para atualizar label
+        def update_label():
+            label_pos.setText(f'Posição atual: ({spin_x.value()}, {spin_y.value()})')
+        
+        spin_x.valueChanged.connect(update_label)
+        spin_y.valueChanged.connect(update_label)
         
         # Botão para recapturar posição
         btn_recapture = QPushButton('📍 Recapturar Posição')
@@ -1941,9 +2025,12 @@ class EditableActionsList(QWidget):
         
         layout = QVBoxLayout()
         
-        # Posições atuais (apenas exibição)
-        layout.addWidget(QLabel(f'Início: ({acao["x1"]}, {acao["y1"]})'))
-        layout.addWidget(QLabel(f'Fim: ({acao["x2"]}, {acao["y2"]})'))
+        # Posições atuais (labels que serão atualizados)
+        label_inicio = QLabel(f'Início: ({acao["x1"]}, {acao["y1"]})')
+        layout.addWidget(label_inicio)
+        
+        label_fim = QLabel(f'Fim: ({acao["x2"]}, {acao["y2"]})')
+        layout.addWidget(label_fim)
         
         # Spinboxes ocultos apenas para armazenar valores
         spin_x1 = QSpinBox()
@@ -1969,6 +2056,16 @@ class EditableActionsList(QWidget):
         spin_y2.setMaximum(10000)
         spin_y2.setValue(acao['y2'])
         spin_y2.hide()
+        
+        # Função para atualizar labels
+        def update_labels():
+            label_inicio.setText(f'Início: ({spin_x1.value()}, {spin_y1.value()})')
+            label_fim.setText(f'Fim: ({spin_x2.value()}, {spin_y2.value()})')
+        
+        spin_x1.valueChanged.connect(update_labels)
+        spin_y1.valueChanged.connect(update_labels)
+        spin_x2.valueChanged.connect(update_labels)
+        spin_y2.valueChanged.connect(update_labels)
         
         # Botão para recapturar
         btn_recapture = QPushButton('📍 Recapturar Arraste')
@@ -2245,17 +2342,17 @@ class ActionItemWidget(QWidget):
         btn_up.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: #666;
+                color: #ddd;
                 border: none;
                 font-size: 10px;
                 padding: 0px;
             }
-            QPushButton:hover {
+            QPushButton:hover:enabled {
                 color: #88c22b;
                 background-color: rgba(136, 194, 43, 0.1);
             }
             QPushButton:disabled {
-                color: #ccc;
+                color: #333;
             }
         """)
         btn_up.clicked.connect(self.move_up)
@@ -2268,17 +2365,17 @@ class ActionItemWidget(QWidget):
         btn_down.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: #666;
+                color: #ddd;
                 border: none;
                 font-size: 10px;
                 padding: 0px;
             }
-            QPushButton:hover {
+            QPushButton:hover:enabled {
                 color: #88c22b;
                 background-color: rgba(136, 194, 43, 0.1);
             }
             QPushButton:disabled {
-                color: #ccc;
+                color: #333;
             }
         """)
         btn_down.clicked.connect(self.move_down)
@@ -2373,17 +2470,23 @@ class ActionItemWidget(QWidget):
     
     def on_delete_clicked(self):
         """Callback botão deletar"""
-        msg = QMessageBox(self)
+        msg = QMessageBox()
         msg.setWindowTitle('Confirmar exclusão')
         msg.setText('Deseja realmente excluir esta ação?')
         
         btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
         btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
         
-        msg.exec()
+        result = msg.exec()
         
         if msg.clickedButton() == btn_sim:
             self.parent_list.delete_acao(self.index)
+        
+        # Reabrir janela de atalho se existir
+        if self.parent_list.parent_window:
+            self.parent_list.parent_window.show()
+            self.parent_list.parent_window.raise_()
+            self.parent_list.parent_window.activateWindow()
     
     def move_up(self):
         """Mover ação para cima (uma posição)"""
@@ -2394,14 +2497,6 @@ class ActionItemWidget(QWidget):
         """Mover ação para baixo (uma posição)"""
         if self.index < len(self.parent_list.acoes) - 1:
             self.parent_list.move_acao(self.index, self.index + 1)
-            if from_index != self.index and self.parent_list.is_dragging:
-                # Atualizar hover index
-                if self.parent_list.drag_hover_index != self.index:
-                    self.parent_list.drag_hover_index = self.index
-                    self.parent_list.reorder_visual_for_drag(from_index, self.index)
-            
-            event.acceptProposedAction()
-    
 
 
 class AddShortcutWindow(QWidget):
@@ -2483,10 +2578,6 @@ class AddShortcutWindow(QWidget):
         btn_click.clicked.connect(self.add_click_action)
         acoes_buttons.addWidget(btn_click)
         
-        btn_right_click = QPushButton('+ Clique Direito')
-        btn_right_click.clicked.connect(self.add_right_click_action)
-        acoes_buttons.addWidget(btn_right_click)
-        
         btn_drag = QPushButton('+ Arrastar')
         btn_drag.clicked.connect(self.add_drag_action)
         acoes_buttons.addWidget(btn_drag)
@@ -2546,19 +2637,63 @@ class AddShortcutWindow(QWidget):
             self.acoes_list.add_acao({'type': 'type', 'text': texto})
     
     def add_click_action(self):
-        # Perguntar quantos cliques
-        from PyQt6.QtWidgets import QInputDialog
-        vezes, ok = QInputDialog.getInt(self, 'Cliques', 'Quantos cliques?', 1, 1, 100, 1)
-        if not ok:
-            return
+        # Dialog personalizado para escolher tipo e quantidade
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QRadioButton, QButtonGroup, QDialogButtonBox
         
-        # Minimizar janela antes de capturar
-        self.showMinimized()
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Adicionar Clique')
+        dialog.setFixedWidth(300)
         
-        # Criar overlay escuro para capturar clique
-        self.overlay = ClickCaptureOverlay()
-        self.overlay.coordinate_captured.connect(lambda x, y: self.on_coordinate_captured(x, y, vezes))
-        self.overlay.showFullScreen()
+        layout = QVBoxLayout()
+        
+        # Tipo de botão
+        layout.addWidget(QLabel('Tipo de botão:'))
+        
+        btn_group = QButtonGroup(dialog)
+        radio_esquerdo = QRadioButton('Botão Esquerdo')
+        radio_direito = QRadioButton('Botão Direito')
+        
+        btn_group.addButton(radio_esquerdo)
+        btn_group.addButton(radio_direito)
+        
+        # Esquerdo selecionado por padrão
+        radio_esquerdo.setChecked(True)
+        
+        layout.addWidget(radio_esquerdo)
+        layout.addWidget(radio_direito)
+        
+        # Quantidade de cliques
+        layout.addWidget(QLabel('\nQuantos cliques?'))
+        spin_vezes = QSpinBox()
+        spin_vezes.setMinimum(1)
+        spin_vezes.setMaximum(100)
+        spin_vezes.setValue(1)
+        layout.addWidget(spin_vezes)
+        
+        # Botões
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            vezes = spin_vezes.value()
+            is_right = radio_direito.isChecked()
+            
+            # Minimizar janela antes de capturar
+            self.showMinimized()
+            
+            # Criar overlay escuro para capturar clique
+            if is_right:
+                self.overlay = ClickCaptureOverlay(button_type='right')
+                self.overlay.coordinate_captured.connect(self.on_right_click_captured)
+            else:
+                self.overlay = ClickCaptureOverlay()
+                self.overlay.coordinate_captured.connect(lambda x, y: self.on_coordinate_captured(x, y, vezes))
+            
+            self.overlay.showFullScreen()
     
     def add_right_click_action(self):
         """Adicionar ação de clique com botão direito"""
