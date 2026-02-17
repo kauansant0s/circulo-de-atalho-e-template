@@ -2,9 +2,12 @@ import sys
 import sqlite3
 import time
 import json
+import requests
+import hashlib
+from firebase_config import FIREBASE_CONFIG, SETORES
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
-                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox)
+                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox, QTabWidget)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty
 from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient
 from pynput import keyboard, mouse
@@ -69,8 +72,10 @@ class NotificationWidget(QWidget):
 
 
 class Database:
-    def __init__(self):
+    def __init__(self, user_id=None, user_setor=None):
         self.conn = sqlite3.connect('assistivetouch.db', check_same_thread=False)
+        self.user_id = user_id
+        self.user_setor = user_setor
         self.create_tables()
     
     def create_tables(self):
@@ -87,13 +92,23 @@ class Database:
                 cursor.execute('ALTER TABLE templates ADD COLUMN atalho TEXT')
         else:
             cursor.execute('''
-                CREATE TABLE templates (
+                CREATE TABLE IF NOT EXISTS templates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nome TEXT NOT NULL,
                     texto TEXT NOT NULL,
-                    atalho TEXT
+                    atalho TEXT,
+                    usuario_id TEXT,
+                    setor TEXT
                 )
             ''')
+
+        # Adicionar colunas de multi-usuário se não existirem
+        cursor.execute("PRAGMA table_info(templates)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'usuario_id' not in columns:
+            cursor.execute('ALTER TABLE templates ADD COLUMN usuario_id TEXT')
+        if 'setor' not in columns:
+            cursor.execute('ALTER TABLE templates ADD COLUMN setor TEXT')
         
         # Tabela de atalhos (shortcuts de automação)
         cursor.execute('''
@@ -102,10 +117,20 @@ class Database:
                 nome TEXT NOT NULL,
                 ativo INTEGER DEFAULT 1,
                 acoes TEXT NOT NULL,
-                tecla_atalho TEXT
+                tecla_atalho TEXT,
+                usuario_id TEXT,
+                setor TEXT
             )
         ''')
-        
+
+        # Adicionar colunas de multi-usuário em shortcuts
+        cursor.execute("PRAGMA table_info(shortcuts)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'usuario_id' not in columns:
+            cursor.execute('ALTER TABLE shortcuts ADD COLUMN usuario_id TEXT')
+        if 'setor' not in columns:
+            cursor.execute('ALTER TABLE shortcuts ADD COLUMN setor TEXT')
+
         # Verificar se coluna tecla_atalho existe
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='shortcuts'")
         if cursor.fetchone():
@@ -136,21 +161,32 @@ class Database:
     
     def add_template(self, nome, texto, atalho=None):
         cursor = self.conn.cursor()
-        cursor.execute('INSERT INTO templates (nome, texto, atalho) VALUES (?, ?, ?)', 
-                      (nome, texto, atalho))
+        cursor.execute('INSERT INTO templates (nome, texto, atalho, usuario_id, setor) VALUES (?, ?, ?, ?, ?)', 
+                    (nome, texto, atalho, self.user_id, self.user_setor))
         self.conn.commit()
     
-    def get_templates(self):
+    def get_templates(self, apenas_meus=False):
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, nome, texto, atalho FROM templates')
+        if apenas_meus:
+            # Apenas templates do próprio usuário
+            cursor.execute('SELECT id, nome, texto, atalho FROM templates WHERE usuario_id = ?', (self.user_id,))
+        else:
+            # Templates do setor (incluindo os meus)
+            cursor.execute('SELECT id, nome, texto, atalho FROM templates WHERE setor = ?', (self.user_setor,))
         return cursor.fetchall()
     
-    def search_templates(self, query):
+    def search_templates(self, query, apenas_meus=False):
         cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT id, nome, texto, atalho FROM templates 
-            WHERE nome LIKE ? OR texto LIKE ?
-        ''', (f'%{query}%', f'%{query}%'))
+        if apenas_meus:
+            cursor.execute('''
+                SELECT id, nome, texto, atalho FROM templates 
+                WHERE (nome LIKE ? OR texto LIKE ?) AND usuario_id = ?
+            ''', (f'%{query}%', f'%{query}%', self.user_id))
+        else:
+            cursor.execute('''
+                SELECT id, nome, texto, atalho FROM templates 
+                WHERE (nome LIKE ? OR texto LIKE ?) AND setor = ?
+            ''', (f'%{query}%', f'%{query}%', self.user_setor))
         return cursor.fetchall()
     
     def delete_template(self, id):
@@ -169,20 +205,24 @@ class Database:
     def add_shortcut(self, nome, acoes, tecla_atalho=None):
         cursor = self.conn.cursor()
         acoes_json = json.dumps(acoes)
-        cursor.execute('INSERT INTO shortcuts (nome, ativo, acoes, tecla_atalho) VALUES (?, 1, ?, ?)', 
-                      (nome, acoes_json, tecla_atalho))
+        cursor.execute('INSERT INTO shortcuts (nome, ativo, acoes, tecla_atalho, usuario_id, setor) VALUES (?, 1, ?, ?, ?, ?)', 
+                    (nome, acoes_json, tecla_atalho, self.user_id, self.user_setor))
         self.conn.commit()
     
     def update_shortcut(self, id, nome, acoes, tecla_atalho=None):
         cursor = self.conn.cursor()
         acoes_json = json.dumps(acoes)
-        cursor.execute('UPDATE shortcuts SET nome = ?, acoes = ?, tecla_atalho = ? WHERE id = ?',
-                      (nome, acoes_json, tecla_atalho, id))
+        cursor.execute('UPDATE shortcuts SET nome = ?, acoes = ?, tecla_atalho = ?, usuario_id = ?, setor = ? WHERE id = ?',
+                    (nome, acoes_json, tecla_atalho, self.user_id, self.user_setor, id))
         self.conn.commit()
     
-    def get_shortcuts(self):
+    def get_shortcuts(self, apenas_meus=False):
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, nome, ativo, acoes, tecla_atalho FROM shortcuts')
+        if apenas_meus:
+            cursor.execute('SELECT id, nome, ativo, acoes, tecla_atalho FROM shortcuts WHERE usuario_id = ?', (self.user_id,))
+        else:
+            cursor.execute('SELECT id, nome, ativo, acoes, tecla_atalho FROM shortcuts WHERE setor = ?', (self.user_setor,))
+        
         results = cursor.fetchall()
         shortcuts = []
         for row in results:
@@ -265,6 +305,256 @@ class Database:
             return int(x_result[0]), int(y_result[0])
         return None
 
+class FirebaseAuth:
+    """Gerenciador de autenticação Firebase"""
+    
+    def __init__(self):
+        self.api_key = FIREBASE_CONFIG['apiKey']
+        self.project_id = FIREBASE_CONFIG['projectId']
+        self.current_user = None
+        self.id_token = None
+        
+    def signup(self, email, password, nome, username, setor):
+        """Criar conta (fica pendente de aprovação)"""
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.api_key}"
+        data = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=data)
+        if response.status_code == 200:
+            result = response.json()
+            uid = result['localId']
+            self.id_token = result['idToken']
+            
+            # Salvar dados do usuário pendente
+            self.save_pending_user(uid, nome, username, setor, email)
+            return {'success': True, 'uid': uid}
+        else:
+            error = response.json().get('error', {}).get('message', 'Erro desconhecido')
+            return {'success': False, 'error': error}
+    
+    def login(self, email, password):
+        """Login com email/senha"""
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={self.api_key}"
+        data = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=data)
+        if response.status_code == 200:
+            result = response.json()
+            self.id_token = result['idToken']
+            uid = result['localId']
+            
+            # Buscar dados do usuário
+            user_data = self.get_user_data(uid)
+            if user_data and user_data.get('aprovado'):
+                self.current_user = user_data
+                self.current_user['uid'] = uid
+                return {'success': True, 'user': self.current_user}
+            else:
+                return {'success': False, 'error': 'Usuário aguardando aprovação'}
+        else:
+            return {'success': False, 'error': 'Email ou senha incorretos'}
+    
+    def save_pending_user(self, uid, nome, username, setor, email):
+        """Salvar usuário pendente no Firestore"""
+        url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/pending_users/{uid}"
+        headers = {"Authorization": f"Bearer {self.id_token}"}
+        data = {
+            "fields": {
+                "nome": {"stringValue": nome},
+                "username": {"stringValue": username},
+                "setor": {"stringValue": setor},
+                "email": {"stringValue": email},
+                "aprovado": {"booleanValue": False}
+            }
+        }
+        requests.patch(url, headers=headers, json=data)
+    
+    def get_user_data(self, uid):
+        """Buscar dados do usuário aprovado"""
+        url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios/{uid}"
+        headers = {"Authorization": f"Bearer {self.id_token}"}
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            fields = data.get('fields', {})
+            return {
+                'nome': fields.get('nome', {}).get('stringValue', ''),
+                'username': fields.get('username', {}).get('stringValue', ''),
+                'setor': fields.get('setor', {}).get('stringValue', ''),
+                'aprovado': fields.get('aprovado', {}).get('booleanValue', False),
+                'is_admin': fields.get('is_admin', {}).get('booleanValue', False)
+            }
+        return None
+    
+    def logout(self):
+        """Deslogar"""
+        self.current_user = None
+        self.id_token = None
+
+class LoginWindow(QWidget):
+    """Tela de login/cadastro"""
+    login_success = pyqtSignal(dict)
+    
+    def __init__(self, firebase_auth):
+        super().__init__()
+        self.firebase = firebase_auth
+        self.init_ui()
+    
+    def init_ui(self):
+        self.setWindowTitle('AssistiveTouch - Login')
+        self.setFixedSize(400, 500)
+        self.setWindowFlags(Qt.WindowType.Window)
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(15)
+        
+        # Logo/Título
+        titulo = QLabel('🔘 AssistiveTouch')
+        titulo.setStyleSheet('font-size: 24px; font-weight: bold; color: #2d2d2d;')
+        titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(titulo)
+        
+        subtitulo = QLabel('Sistema de Automação Multi-usuário')
+        subtitulo.setStyleSheet('font-size: 12px; color: #666;')
+        subtitulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitulo)
+        
+        layout.addSpacing(20)
+        
+        # Tabs Login/Cadastro
+        self.tabs = QTabWidget()
+        
+        # Tab Login
+        login_tab = QWidget()
+        login_layout = QVBoxLayout()
+        
+        login_layout.addWidget(QLabel('Email:'))
+        self.login_email = QLineEdit()
+        self.login_email.setPlaceholderText('seu@email.com')
+        login_layout.addWidget(self.login_email)
+        
+        login_layout.addWidget(QLabel('Senha:'))
+        self.login_senha = QLineEdit()
+        self.login_senha.setEchoMode(QLineEdit.EchoMode.Password)
+        self.login_senha.setPlaceholderText('••••••••')
+        login_layout.addWidget(self.login_senha)
+        
+        btn_login = QPushButton('Entrar')
+        btn_login.setStyleSheet("""
+            QPushButton {
+                background-color: #406e54;
+                color: white;
+                padding: 12px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #355a45;
+            }
+        """)
+        btn_login.clicked.connect(self.do_login)
+        login_layout.addWidget(btn_login)
+        
+        login_tab.setLayout(login_layout)
+        
+        # Tab Cadastro
+        cadastro_tab = QWidget()
+        cadastro_layout = QVBoxLayout()
+        
+        cadastro_layout.addWidget(QLabel('Nome Completo:'))
+        self.cad_nome = QLineEdit()
+        cadastro_layout.addWidget(self.cad_nome)
+        
+        cadastro_layout.addWidget(QLabel('Username:'))
+        self.cad_username = QLineEdit()
+        cadastro_layout.addWidget(self.cad_username)
+        
+        cadastro_layout.addWidget(QLabel('Email:'))
+        self.cad_email = QLineEdit()
+        cadastro_layout.addWidget(self.cad_email)
+        
+        cadastro_layout.addWidget(QLabel('Senha:'))
+        self.cad_senha = QLineEdit()
+        self.cad_senha.setEchoMode(QLineEdit.EchoMode.Password)
+        cadastro_layout.addWidget(self.cad_senha)
+        
+        cadastro_layout.addWidget(QLabel('Setor:'))
+        self.cad_setor = QComboBox()
+        self.cad_setor.addItems(SETORES)
+        cadastro_layout.addWidget(self.cad_setor)
+        
+        btn_cadastro = QPushButton('Criar Conta')
+        btn_cadastro.setStyleSheet("""
+            QPushButton {
+                background-color: #88c22b;
+                color: white;
+                padding: 12px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #76a824;
+            }
+        """)
+        btn_cadastro.clicked.connect(self.do_cadastro)
+        cadastro_layout.addWidget(btn_cadastro)
+        
+        cadastro_tab.setLayout(cadastro_layout)
+        
+        self.tabs.addTab(login_tab, 'Login')
+        self.tabs.addTab(cadastro_tab, 'Cadastro')
+        
+        layout.addWidget(self.tabs)
+        
+        self.setLayout(layout)
+    
+    def do_login(self):
+        email = self.login_email.text().strip()
+        senha = self.login_senha.text()
+        
+        if not email or not senha:
+            QMessageBox.warning(self, 'Erro', 'Preencha todos os campos!')
+            return
+        
+        result = self.firebase.login(email, senha)
+        if result['success']:
+            self.login_success.emit(result['user'])
+            self.close()
+        else:
+            QMessageBox.warning(self, 'Erro', result['error'])
+    
+    def do_cadastro(self):
+        nome = self.cad_nome.text().strip()
+        username = self.cad_username.text().strip()
+        email = self.cad_email.text().strip()
+        senha = self.cad_senha.text()
+        setor = self.cad_setor.currentText()
+        
+        if not all([nome, username, email, senha]):
+            QMessageBox.warning(self, 'Erro', 'Preencha todos os campos!')
+            return
+        
+        result = self.firebase.signup(email, senha, nome, username, setor)
+        if result['success']:
+            QMessageBox.information(
+                self, 
+                'Cadastro Enviado',
+                'Sua conta foi criada e está aguardando aprovação do administrador.\n\n'
+                'Você receberá acesso assim que for aprovado.'
+            )
+            self.tabs.setCurrentIndex(0)  # Voltar pra tab login
+        else:
+            QMessageBox.warning(self, 'Erro', result['error'])
 
 class KeyboardSignals(QObject):
     show_popup = pyqtSignal(int, int)
@@ -800,9 +1090,11 @@ class TemplatesPopup(QWidget):
 
 
 class FloatingCircle(QWidget):
-    def __init__(self, db):
+    def __init__(self, db, firebase, user_data):
         super().__init__()
         self.db = db
+        self.firebase = firebase
+        self.user_data = user_data
         self.dragging = False
         self.drag_start_position = QPoint()
         self.click_position = QPoint()
@@ -1005,7 +1297,7 @@ class FloatingCircle(QWidget):
         self.menu_open = True
         
         # Criar menu
-        self.menu = MainMenu(self.db, self)
+        self.menu = MainMenu(self.db, self, self.firebase, self.user_data)
         
         # Conectar evento de fechar
         def on_menu_closed():
@@ -1098,10 +1390,12 @@ class FloatingCircle(QWidget):
 class MainMenu(QWidget):
     _last_tab = 'templates'  # Variável de classe para lembrar última aba
     
-    def __init__(self, db, parent=None):
+    def __init__(self, db, parent=None, firebase=None, user_data=None):
         super().__init__(parent)
         self.db = db
         self.circle_parent = parent
+        self.firebase = firebase
+        self.user_data = user_data
         self.add_window = None  # Manter referência
         self.init_ui()
     
@@ -1161,12 +1455,18 @@ class MainMenu(QWidget):
         
         self.btn_templates = QPushButton('Templates')
         self.btn_atalhos = QPushButton('Atalhos')
-        
+        self.btn_config = QPushButton('⚙️')  # Botão de config
+
         self.btn_templates.clicked.connect(self.show_templates_tab)
         self.btn_atalhos.clicked.connect(self.show_atalhos_tab)
-        
+        self.btn_config.clicked.connect(self.show_config_tab)
+
+        # Estilo do botão config (menor, ícone)
+        self.btn_config.setFixedWidth(50)
+
         tabs_layout.addWidget(self.btn_templates)
         tabs_layout.addWidget(self.btn_atalhos)
+        tabs_layout.addWidget(self.btn_config)
         
         # Espaçamento menor antes do botão sair
         tabs_layout.addSpacing(20)
@@ -1245,193 +1545,140 @@ class MainMenu(QWidget):
             child = self.content_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+
+                # Sub-abas: Meus Templates / Templates do Setor
+                sub_tabs = QWidget()
+                sub_layout = QHBoxLayout()
+                sub_layout.setContentsMargins(0, 0, 0, 0)
+                sub_layout.setSpacing(5)
+                
+                self.btn_meus_templates = QPushButton('Meus Templates')
+                self.btn_setor_templates = QPushButton('Templates do Setor')
+                
+                self.btn_meus_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=True))
+                self.btn_setor_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=False))
+                
+                sub_layout.addWidget(self.btn_meus_templates)
+                sub_layout.addWidget(self.btn_setor_templates)
+                sub_tabs.setLayout(sub_layout)
+                
+                self.content_layout.addWidget(sub_tabs)
+                
+                # Mostrar templates do setor por padrão
+                self.show_templates_list(apenas_meus=False)
+
+    def show_templates_list(self, apenas_meus=False):
+        """Mostrar lista de templates (meus ou do setor)"""
+        # Remover conteúdo antigo (exceto os botões de sub-aba)
+        while self.content_layout.count() > 1:  # Manter primeiro widget (sub-abas)
+            child = self.content_layout.takeAt(1)
+            if child.widget():
+                child.widget().deleteLater()
         
-        self.btn_templates.setStyleSheet("""
+        # Atualizar estilo dos botões
+        if apenas_meus:
+            self.btn_meus_templates.setStyleSheet("""
+                QPushButton {
+                    background-color: #406e54;
+                    color: white;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+            self.btn_setor_templates.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    color: #666;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                }
+            """)
+        else:
+            self.btn_meus_templates.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    color: #666;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                }
+            """)
+            self.btn_setor_templates.setStyleSheet("""
+                QPushButton {
+                    background-color: #406e54;
+                    color: white;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        
+        # Busca
+        search_container = QWidget()
+        search_layout = QHBoxLayout()
+        search_layout.setContentsMargins(0, 10, 0, 10)
+        
+        search_input = QLineEdit()
+        search_input.setPlaceholderText('🔍 Buscar templates...')
+        search_input.setStyleSheet("""
+            QLineEdit {
+                padding: 8px;
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #88c22b;
+            }
+        """)
+        search_input.textChanged.connect(lambda text: self.filter_templates(text, apenas_meus))
+        search_layout.addWidget(search_input)
+        
+        search_container.setLayout(search_layout)
+        self.content_layout.addWidget(search_container)
+        
+        # Lista de templates
+        self.current_templates_list = QWidget()
+        templates_layout = QVBoxLayout()
+        templates_layout.setSpacing(8)
+        
+        templates = self.db.get_templates(apenas_meus=apenas_meus)
+        
+        if not templates:
+            empty_label = QLabel('Nenhum template encontrado' if apenas_meus else 'Nenhum template no setor')
+            empty_label.setStyleSheet('color: #999; font-style: italic; padding: 20px;')
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            templates_layout.addWidget(empty_label)
+        else:
+            for template in templates:
+                # Aqui você vai usar o mesmo código que já tinha para renderizar cada template
+                # Copie o código do template card que já existia
+                pass  # Por enquanto vazio, vou te ajudar no próximo passo
+        
+        self.current_templates_list.setLayout(templates_layout)
+        self.content_layout.addWidget(self.current_templates_list)
+        
+        # Botão adicionar
+        btn_add = QPushButton('+ Novo Template')
+        btn_add.setStyleSheet("""
             QPushButton {
-                background-color: #406e54;
+                background-color: #88c22b;
                 color: white;
                 border: none;
                 padding: 12px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-        """)
-        self.btn_atalhos.setStyleSheet("""
-            QPushButton {
-                background-color: #c8bfb8;
-                color: #3d3d3d;
-                border: none;
-                padding: 12px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #b8ada6;
-            }
-        """)
-        
-        # Botões de ação no topo
-        top_buttons = QHBoxLayout()
-        
-        btn_add = QPushButton('+ Adicionar')
-        btn_add.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #406e54;
-                border: none;
-                padding: 10px;
-                font-size: 12px;
+                border-radius: 6px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: rgba(64, 110, 84, 0.1);
+                background-color: #76a824;
             }
         """)
         btn_add.clicked.connect(self.add_template)
-        top_buttons.addWidget(btn_add)
-        
-        # Botão deletar selecionados (inicialmente oculto)
-        self.btn_delete_selected_templates = QPushButton('🗑 Excluir Selecionados')
-        self.btn_delete_selected_templates.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #82414c;
-                border: none;
-                padding: 10px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(130, 65, 76, 0.1);
-            }
-        """)
-        self.btn_delete_selected_templates.clicked.connect(self.delete_selected_templates)
-        self.btn_delete_selected_templates.hide()
-        top_buttons.addWidget(self.btn_delete_selected_templates)
-        
-        top_buttons.addStretch()
-        self.content_layout.addLayout(top_buttons)
-        
-        line = QWidget()
-        line.setFixedHeight(1)
-        line.setStyleSheet("background-color: #d0c7c0;")
-        self.content_layout.addWidget(line)
-        
-        templates = self.db.get_templates()
-        
-        # Lista para armazenar checkboxes selecionados
-        self.selected_templates = []
-        
-        if templates:
-            for template in templates:
-                template_widget = QWidget()
-                template_widget.setStyleSheet("""
-                    QWidget {
-                        background-color: white;
-                        border: 1px solid #d0c7c0;
-                        border-radius: 8px;
-                    }
-                """)
-                
-                template_layout = QVBoxLayout()
-                template_layout.setContentsMargins(12, 10, 12, 10)
-                template_layout.setSpacing(4)
-                
-                # Primeira linha: Checkbox, Nome e botão deletar
-                first_line = QHBoxLayout()
-                first_line.setSpacing(8)
-                
-                # Checkbox para seleção
-                checkbox = QCheckBox()
-                checkbox.setStyleSheet("""
-                    QCheckBox {
-                        spacing: 8px;
-                    }
-                    QCheckBox::indicator {
-                        width: 20px;
-                        height: 20px;
-                        border: 2px solid #888;
-                        border-radius: 3px;
-                        background-color: white;
-                    }
-                    QCheckBox::indicator:hover {
-                        border: 2px solid #88c22b;
-                    }
-                    QCheckBox::indicator:checked {
-                        background-color: #88c22b;
-                        border: 2px solid #88c22b;
-                    }
-                """)
-                checkbox.stateChanged.connect(lambda state, tid=template[0]: self.on_template_selection_changed(tid, state))
-                first_line.addWidget(checkbox)
-                
-                nome_label = QLabel(template[1])
-                nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
-                first_line.addWidget(nome_label, stretch=1)
-                
-                # Botão editar
-                btn_edit = QPushButton('✎')  # Edit icon
-                btn_edit.setFixedSize(26, 26)
-                btn_edit.setStyleSheet("""
-                    QPushButton {
-                        background-color: transparent;
-                        color: #406e54;
-                        border: none;
-                        border-radius: 4px;
-                        font-size: 18px;
-                        font-weight: normal;
-                        padding: 0px;
-                    }
-                    QPushButton:hover {
-                        background-color: rgba(64, 110, 84, 0.15);
-                    }
-                """)
-                btn_edit.clicked.connect(lambda checked, tid=template[0], tnome=template[1], ttexto=template[2], tatalho=template[3]: self.edit_template(tid, tnome, ttexto, tatalho))
-                first_line.addWidget(btn_edit)
-                
-                # Botão deletar pequeno  
-                btn_delete = QPushButton('🗑')  # Delete icon
-                btn_delete.setFixedSize(26, 26)
-                btn_delete.setFixedSize(24, 24)
-                btn_delete.setStyleSheet("""
-                    QPushButton {
-                        background-color: transparent;
-                        color: #82414c;
-                        border: none;
-                        border-radius: 4px;
-                        font-size: 14px;
-                        padding: 0px;
-                    }
-                    QPushButton:hover {
-                        background-color: rgba(130, 65, 76, 0.15);
-                    }
-                """)
-                btn_delete.clicked.connect(lambda checked, tid=template[0]: self.delete_template(tid))
-                first_line.addWidget(btn_delete)
-                
-                template_layout.addLayout(first_line)
-                
-                # Segunda linha: Preview do texto
-                texto_preview = template[2][:60] + '...' if len(template[2]) > 60 else template[2]
-                texto_label = QLabel(texto_preview)
-                texto_label.setStyleSheet('font-size: 11px; color: #777;')
-                texto_label.setWordWrap(True)
-                template_layout.addWidget(texto_label)
-                
-                # Terceira linha: Atalho (se existir)
-                if template[3]:
-                    atalho_label = QLabel(f'Atalho: ⚡ {template[3]}')
-                    atalho_label.setStyleSheet('font-size: 10px; color: #88c22b; font-weight: bold; margin-top: 2px;')
-                    template_layout.addWidget(atalho_label)
-                
-                template_widget.setLayout(template_layout)
-                self.content_layout.addWidget(template_widget)
-        else:
-            empty_label = QLabel('Nenhum template ainda.\nClique em "Adicionar template" para criar o primeiro!')
-            empty_label.setStyleSheet('color: #888; padding: 30px; font-size: 12px;')
-            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.content_layout.addWidget(empty_label)
-        
-        self.content_layout.addStretch()
+        self.content_layout.addWidget(btn_add)
     
     def on_template_selection_changed(self, template_id, state):
         """Callback quando checkbox de template é alterado"""
@@ -1547,7 +1794,118 @@ class MainMenu(QWidget):
             child = self.content_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+
+                # Sub-abas: Meus Atalhos / Atalhos do Setor
+                sub_tabs = QWidget()
+                sub_layout = QHBoxLayout()
+                sub_layout.setContentsMargins(0, 0, 0, 0)
+                sub_layout.setSpacing(5)
+                
+                self.btn_meus_atalhos = QPushButton('Meus Atalhos')
+                self.btn_setor_atalhos = QPushButton('Atalhos do Setor')
+                
+                self.btn_meus_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=True))
+                self.btn_setor_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=False))
+                
+                sub_layout.addWidget(self.btn_meus_atalhos)
+                sub_layout.addWidget(self.btn_setor_atalhos)
+                sub_tabs.setLayout(sub_layout)
+                
+                self.content_layout.addWidget(sub_tabs)
+                
+                # Mostrar atalhos do setor por padrão
+                self.show_atalhos_list(apenas_meus=False)
+    
+    def show_atalhos_list(self, apenas_meus=False):
+        """Mostrar lista de atalhos (meus ou do setor)"""
+        # Remover conteúdo antigo (exceto sub-abas)
+        while self.content_layout.count() > 1:
+            child = self.content_layout.takeAt(1)
+            if child.widget():
+                child.widget().deleteLater()
         
+        # Atualizar estilo dos botões
+        if apenas_meus:
+            self.btn_meus_atalhos.setStyleSheet("""
+                QPushButton {
+                    background-color: #406e54;
+                    color: white;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+            self.btn_setor_atalhos.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    color: #666;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                }
+            """)
+        else:
+            self.btn_meus_atalhos.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    color: #666;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                }
+            """)
+            self.btn_setor_atalhos.setStyleSheet("""
+                QPushButton {
+                    background-color: #406e54;
+                    color: white;
+                    border: none;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        
+        # Lista de atalhos
+        shortcuts = self.db.get_shortcuts(apenas_meus=apenas_meus)
+        
+        if not shortcuts:
+            empty_label = QLabel('Nenhum atalho encontrado' if apenas_meus else 'Nenhum atalho no setor')
+            empty_label.setStyleSheet('color: #999; font-style: italic; padding: 20px;')
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.content_layout.addWidget(empty_label)
+        else:
+            for shortcut in shortcuts:
+                # Card do atalho (copie o código que já existia)
+                # Vou te dar no próximo passo
+                pass
+        
+        # Botão adicionar
+        btn_add = QPushButton('+ Novo Atalho')
+        btn_add.setStyleSheet("""
+            QPushButton {
+                background-color: #88c22b;
+                color: white;
+                border: none;
+                padding: 12px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #76a824;
+            }
+        """)
+        btn_add.clicked.connect(self.add_shortcut)
+        self.content_layout.addWidget(btn_add)
+
+    def show_config_tab(self):
+        """Mostrar aba de configurações"""
+        while self.content_layout.count():
+            child = self.content_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Atualizar estilo dos botões
         self.btn_templates.setStyleSheet("""
             QPushButton {
                 background-color: #c8bfb8;
@@ -1555,12 +1913,20 @@ class MainMenu(QWidget):
                 border: none;
                 padding: 12px;
                 font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #b8ada6;
+                font-weight: bold;
             }
         """)
         self.btn_atalhos.setStyleSheet("""
+            QPushButton {
+                background-color: #c8bfb8;
+                color: #3d3d3d;
+                border: none;
+                padding: 12px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+        """)
+        self.btn_config.setStyleSheet("""
             QPushButton {
                 background-color: #406e54;
                 color: white;
@@ -1571,219 +1937,107 @@ class MainMenu(QWidget):
             }
         """)
         
-        # Botões de ação no topo
-        top_buttons = QHBoxLayout()
+        # Título
+        titulo = QLabel('⚙️ Configurações')
+        titulo.setStyleSheet('font-size: 18px; font-weight: bold; color: #2d2d2d; padding: 10px;')
+        self.content_layout.addWidget(titulo)
         
-        btn_add = QPushButton('+ Adicionar')
-        btn_add.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #406e54;
-                border: none;
-                padding: 10px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(64, 110, 84, 0.1);
-            }
-        """)
-        btn_add.clicked.connect(self.add_shortcut)
-        top_buttons.addWidget(btn_add)
-        
-        # Botão deletar selecionados (inicialmente oculto)
-        self.btn_delete_selected_shortcuts = QPushButton('🗑 Excluir Selecionados')
-        self.btn_delete_selected_shortcuts.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #82414c;
-                border: none;
-                padding: 10px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(130, 65, 76, 0.1);
+        # Info do usuário
+        user_card = QWidget()
+        user_layout = QVBoxLayout()
+        user_layout.setContentsMargins(15, 15, 15, 15)
+        user_card.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border-radius: 8px;
+                border: 2px solid #e0e0e0;
             }
         """)
-        self.btn_delete_selected_shortcuts.clicked.connect(self.delete_selected_shortcuts)
-        self.btn_delete_selected_shortcuts.hide()
-        top_buttons.addWidget(self.btn_delete_selected_shortcuts)
         
-        top_buttons.addStretch()
-        self.content_layout.addLayout(top_buttons)
+        nome_label = QLabel(f"👤 {self.user_data['nome']}")
+        nome_label.setStyleSheet('font-size: 14px; font-weight: bold; color: #2d2d2d;')
+        user_layout.addWidget(nome_label)
         
-        line = QWidget()
-        line.setFixedHeight(1)
-        line.setStyleSheet("background-color: #d0c7c0;")
-        self.content_layout.addWidget(line)
+        setor_label = QLabel(f"🏢 Setor: {self.user_data['setor']}")
+        setor_label.setStyleSheet('font-size: 12px; color: #666;')
+        user_layout.addWidget(setor_label)
         
-        shortcuts = self.db.get_shortcuts()
+        user_card.setLayout(user_layout)
+        self.content_layout.addWidget(user_card)
         
-        # Lista para armazenar checkboxes selecionados
-        self.selected_shortcuts = []
+        # Opções
+        self.content_layout.addSpacing(10)
         
-        if shortcuts:
-            for shortcut in shortcuts:
-                shortcut_widget = QWidget()
-                shortcut_widget.setStyleSheet("""
-                    QWidget {
-                        background-color: white;
-                        border: 1px solid #d0c7c0;
-                        border-radius: 8px;
-                    }
-                """)
-                
-                shortcut_layout = QVBoxLayout()
-                shortcut_layout.setContentsMargins(12, 10, 12, 10)
-                shortcut_layout.setSpacing(4)
-                
-                # Primeira linha: Checkbox, Nome e Toggle
-                first_line = QHBoxLayout()
-                first_line.setSpacing(8)
-                
-                # Checkbox para seleção
-                checkbox = QCheckBox()
-                checkbox.setStyleSheet("""
-                    QCheckBox {
-                        spacing: 8px;
-                    }
-                    QCheckBox::indicator {
-                        width: 20px;
-                        height: 20px;
-                        border: 2px solid #888;
-                        border-radius: 3px;
-                        background-color: white;
-                    }
-                    QCheckBox::indicator:hover {
-                        border: 2px solid #88c22b;
-                    }
-                    QCheckBox::indicator:checked {
-                        background-color: #88c22b;
-                        border: 2px solid #88c22b;
-                    }
-                """)
-                checkbox.stateChanged.connect(lambda state, sid=shortcut['id']: self.on_shortcut_selection_changed(sid, state))
-                first_line.addWidget(checkbox)
-                
-                nome_label = QLabel(shortcut['nome'])
-                nome_label.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d;')
-                first_line.addWidget(nome_label, stretch=1)
-                
-                # Toggle switch estilo iOS com bolinha
-                toggle_container = QWidget()
-                toggle_container.setFixedSize(50, 26)
-                toggle_layout = QHBoxLayout(toggle_container)
-                toggle_layout.setContentsMargins(0, 0, 0, 0)
-                
-                toggle = QPushButton(toggle_container)
-                toggle.setCheckable(True)
-                toggle.setChecked(shortcut['ativo'])
-                toggle.setFixedSize(50, 26)
-                toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-                
-                # Função para atualizar estilo
-                def get_toggle_style(checked):
-                    if checked:
-                        return """
-                            QPushButton {
-                                background-color: #88c22b;
-                                border-radius: 13px;
-                                border: none;
-                                text-align: right;
-                                padding-right: 4px;
-                                color: white;
-                            }
-                        """
-                    else:
-                        return """
-                            QPushButton {
-                                background-color: #ccc;
-                                border-radius: 13px;
-                                border: none;
-                                text-align: left;
-                                padding-left: 4px;
-                                color: #666;
-                            }
-                        """
-                
-                toggle.setStyleSheet(get_toggle_style(shortcut['ativo']))
-                toggle.setText("●")  # Bolinha
-                
-                def on_toggle_clicked(checked, sid=shortcut['id']):
-                    print(f"Toggle clicado: {checked}")
-                    self.db.toggle_shortcut(sid)
-                    self.show_atalhos_tab()
-                
-                toggle.clicked.connect(on_toggle_clicked)
-                first_line.addWidget(toggle_container)
-                
-                shortcut_layout.addLayout(first_line)
-                
-                # Segunda linha: Resumo das ações e atalho
-                acoes_texto = f"{len(shortcut['acoes'])} ações"
-                if shortcut.get('tecla_atalho'):
-                    tecla = shortcut['tecla_atalho']
-                    # Verificar se é apenas 1-2 caracteres (Alt + tecla)
-                    if len(tecla) <= 2 and tecla.isalpha():
-                        acoes_texto += f" • Comando: Alt+{tecla}"
-                    else:
-                        acoes_texto += f" • Atalho: {tecla}"
-                acoes_label = QLabel(acoes_texto)
-                acoes_label.setStyleSheet('font-size: 11px; color: #777;')
-                shortcut_layout.addWidget(acoes_label)
-                
-                # Botões de ação
-                buttons_layout = QHBoxLayout()
-                buttons_layout.setSpacing(5)
-                
-                btn_edit = QPushButton('✎ Editar')
-                btn_edit.setStyleSheet("""
-                    QPushButton {
-                        background-color: transparent;
-                        color: #406e54;
-                        border: 1px solid #406e54;
-                        padding: 4px 8px;
-                        border-radius: 3px;
-                        font-size: 10px;
-                    }
-                    QPushButton:hover {
-                        background-color: rgba(64, 110, 84, 0.1);
-                    }
-                """)
-                btn_edit.clicked.connect(lambda checked, s=shortcut: self.edit_shortcut(s))
-                buttons_layout.addWidget(btn_edit)
-                
-                btn_delete = QPushButton('🗑 Excluir')
-                btn_delete.setStyleSheet("""
-                    QPushButton {
-                        background-color: transparent;
-                        color: #82414c;
-                        border: 1px solid #82414c;
-                        padding: 4px 8px;
-                        border-radius: 3px;
-                        font-size: 10px;
-                    }
-                    QPushButton:hover {
-                        background-color: rgba(130, 65, 76, 0.1);
-                    }
-                """)
-                btn_delete.clicked.connect(lambda checked, sid=shortcut['id']: self.delete_shortcut(sid))
-                buttons_layout.addWidget(btn_delete)
-                
-                buttons_layout.addStretch()
-                shortcut_layout.addLayout(buttons_layout)
-                
-                shortcut_widget.setLayout(shortcut_layout)
-                self.content_layout.addWidget(shortcut_widget)
-        else:
-            empty_label = QLabel('Nenhum atalho ainda.\nClique em "Adicionar atalho" para criar o primeiro!')
-            empty_label.setStyleSheet('color: #888; padding: 30px; font-size: 12px;')
-            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.content_layout.addWidget(empty_label)
+        # Toggle de animações
+        anim_container = QWidget()
+        anim_layout = QHBoxLayout()
+        anim_layout.setContentsMargins(15, 10, 15, 10)
+        
+        anim_label = QLabel('🎬 Animações')
+        anim_label.setStyleSheet('font-size: 13px; color: #2d2d2d;')
+        anim_layout.addWidget(anim_label, stretch=1)
+        
+        anim_toggle = QCheckBox()
+        anim_toggle.setChecked(True)  # Por padrão ativado
+        anim_toggle.setStyleSheet("""
+            QCheckBox::indicator {
+                width: 40px;
+                height: 20px;
+                border-radius: 10px;
+                background-color: #88c22b;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #ccc;
+            }
+        """)
+        anim_layout.addWidget(anim_toggle)
+        
+        anim_container.setLayout(anim_layout)
+        self.content_layout.addWidget(anim_container)
         
         self.content_layout.addStretch()
-    
+        
+        # Botão logout
+        btn_logout = QPushButton('🚪 Sair da Conta')
+        btn_logout.setStyleSheet("""
+            QPushButton {
+                background-color: #82414c;
+                color: white;
+                border: none;
+                padding: 12px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #6d363f;
+            }
+        """)
+        btn_logout.clicked.connect(self.do_logout)
+        self.content_layout.addWidget(btn_logout)
+
+    def do_logout(self):
+        """Fazer logout e voltar pra tela de login"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Confirmar Logout')
+        msg.setText('Deseja realmente sair da sua conta?')
+        
+        btn_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        result = msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
+            # Deslogar do Firebase
+            self.firebase.logout()
+            
+            # Fechar tudo e voltar pro login
+            self.close()
+            if self.circle_parent:
+                self.circle_parent.close()
+            
+            # Reabrir tela de login
+            QApplication.instance().quit()
+
     def on_shortcut_selection_changed(self, shortcut_id, state):
         """Callback quando checkbox de atalho é alterado"""
         if state == Qt.CheckState.Checked.value:
@@ -3590,19 +3844,25 @@ class EditTemplateWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     
-    # CRITICAL: Impedir que o app feche quando a última janela fecha
-    app.setQuitOnLastWindowClosed(False)
+    # Criar instância de autenticação
+    firebase = FirebaseAuth()
     
-    db = Database()
+    # Mostrar tela de login
+    login_window = LoginWindow(firebase)
     
-    circle = FloatingCircle(db)
-    circle.show()
+    # Quando login for bem-sucedido, criar o círculo
+    def on_login_success(user_data):
+        # Criar database com dados do usuário
+        db = Database(user_id=user_data['uid'], user_setor=user_data['setor'])
+        
+        # Criar círculo com usuário logado
+        circle = FloatingCircle(db, firebase, user_data)
+        circle.show()
     
-    keyboard_listener = KeyboardListener(db)
-    keyboard_listener.start()
+    login_window.login_success.connect(on_login_success)
+    login_window.show()
     
     sys.exit(app.exec())
-
 
 if __name__ == '__main__':
     main()
