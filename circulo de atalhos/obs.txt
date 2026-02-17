@@ -1,14 +1,11 @@
 transformar em um arquivo .exe q eu possa instalar
+tem como cada computador ter o seu próprio banco de dados, meio q um servidor
 qnd eu for atualizar poder baixar a atualização direto do .exe tbm
 criar seções dos templates por setores, então se eu estiver com o setor digitação selecionado, aparece só os templates que o setor de digitação usa
 para acessar os templates de cada setor, tem uma senha, como se cada setor fosse um usuário
-que o sistema reconheça caso uma combinação de teclas já exista em outro atalho e mostre algum aviso, o usuário ainda pode criar o atalho com aquela combinação, mas ai a combinação qua ja existia desativa automaticamente, e caso ele ative a que ja existia, ai a nova que desativa. resumindo, o usuário pode criar mais de um atalho com o mesmo comando, porém só um pode ficar ativo.
 limite de tres teclas para o comando de teclado
-poder adicionar observações em cada passo dos atalhos, para saber onde está clicando, etc.
-adicionar animações pra quando o circulo abrir, fechar e for movido
-quando eu abro o circulo, quero que abra na mesma janela em q parei qnd fechei, se quando o circulo foi fechado estava em atalhos, qnd abrir ele de novo, vai abrir em atalhos,  vice-cersa
 criar uma função de aprender, em que eu faço uma sequência de ações, o programa pega tudo, os cliques, teclas, tempo de espera, textos digitados e coloca todas as ações em ordem pra mim. quando eu clicar no botão aprender, ele minimiza e eu vou fazendo o que eu tenho q fazer, ai qnd eu clico a tecla alt ele para de aprender e cria o atalho pra mim
-ainda não mostra as coordenadas novas depois que eu edito elas e elas tbm não são editadas no atalho, pois eu tentei editar, salvar e fazer o comando do atalho mas ele continua clicando nas mesmas coordenadas de antes
+adicionar as condições, poder fazer assim: faz uma série de cliques, ai eu adiciono uma condição, se eu clicar alt, ai ele segue com outra série de cliques.
 
 criar um botão de confirgurações do lado de sair, onde posso:
 desabilitar as animações se o computador for lento

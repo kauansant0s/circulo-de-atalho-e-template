@@ -123,6 +123,17 @@ class Database:
         
         self.conn.commit()
     
+    def get_config(self, chave, default=None):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT valor FROM config WHERE chave = ?', (chave,))
+        row = cursor.fetchone()
+        return row[0] if row else default
+    
+    def set_config(self, chave, valor):
+        cursor = self.conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO config (chave, valor) VALUES (?, ?)', (chave, str(valor)))
+        self.conn.commit()
+    
     def add_template(self, nome, texto, atalho=None):
         cursor = self.conn.cursor()
         cursor.execute('INSERT INTO templates (nome, texto, atalho) VALUES (?, ?, ?)', 
@@ -186,12 +197,49 @@ class Database:
     
     def toggle_shortcut(self, id):
         cursor = self.conn.cursor()
-        cursor.execute('SELECT ativo FROM shortcuts WHERE id = ?', (id,))
+        cursor.execute('SELECT ativo, tecla_atalho FROM shortcuts WHERE id = ?', (id,))
         result = cursor.fetchone()
         if result:
             novo_status = 0 if result[0] == 1 else 1
             cursor.execute('UPDATE shortcuts SET ativo = ? WHERE id = ?', (novo_status, id))
+            
+            # Se ativando E tem tecla, desativar outros com mesma tecla
+            if novo_status == 1 and result[1]:
+                cursor.execute(
+                    'UPDATE shortcuts SET ativo = 0 WHERE tecla_atalho = ? AND id != ?',
+                    (result[1], id)
+                )
             self.conn.commit()
+    
+    def get_conflito_tecla(self, tecla, excluir_id=None):
+        """Retorna atalhos com a mesma tecla (exceto o próprio ao editar)"""
+        cursor = self.conn.cursor()
+        if excluir_id:
+            cursor.execute(
+                'SELECT id, nome, ativo FROM shortcuts WHERE tecla_atalho = ? AND id != ?',
+                (tecla, excluir_id)
+            )
+        else:
+            cursor.execute(
+                'SELECT id, nome, ativo FROM shortcuts WHERE tecla_atalho = ?',
+                (tecla,)
+            )
+        return cursor.fetchall()  # [(id, nome, ativo), ...]
+    
+    def desativar_conflitos_tecla(self, tecla, excluir_id=None):
+        """Desativa todos os atalhos com a mesma tecla, exceto o especificado"""
+        cursor = self.conn.cursor()
+        if excluir_id:
+            cursor.execute(
+                'UPDATE shortcuts SET ativo = 0 WHERE tecla_atalho = ? AND id != ?',
+                (tecla, excluir_id)
+            )
+        else:
+            cursor.execute(
+                'UPDATE shortcuts SET ativo = 0 WHERE tecla_atalho = ?',
+                (tecla,)
+            )
+        self.conn.commit()
     
     def delete_shortcut(self, id):
         cursor = self.conn.cursor()
@@ -1048,6 +1096,8 @@ class FloatingCircle(QWidget):
 
 
 class MainMenu(QWidget):
+    _last_tab = 'templates'  # Variável de classe para lembrar última aba
+    
     def __init__(self, db, parent=None):
         super().__init__(parent)
         self.db = db
@@ -1179,10 +1229,18 @@ class MainMenu(QWidget):
             }
         """)
         
-        self.show_templates_tab()
         self.setFixedHeight(400)
+        
+        # Abrir na última aba usada (do banco ou variável de classe)
+        last_tab = self.db.get_config('last_tab', MainMenu._last_tab)
+        if last_tab == 'atalhos':
+            self.show_atalhos_tab()
+        else:
+            self.show_templates_tab()
     
     def show_templates_tab(self):
+        MainMenu._last_tab = 'templates'
+        self.db.set_config('last_tab', 'templates')
         while self.content_layout.count():
             child = self.content_layout.takeAt(0)
             if child.widget():
@@ -1483,6 +1541,8 @@ class MainMenu(QWidget):
         self.add_window.activateWindow()
     
     def show_atalhos_tab(self):
+        MainMenu._last_tab = 'atalhos'
+        self.db.set_config('last_tab', 'atalhos')
         while self.content_layout.count():
             child = self.content_layout.takeAt(0)
             if child.widget():
@@ -1842,6 +1902,9 @@ class MainMenu(QWidget):
     
     def toggle_shortcut_status(self, shortcut_id):
         self.db.toggle_shortcut(shortcut_id)
+        # Recarregar listener para refletir mudanças de conflito
+        if hasattr(self, 'circle_parent') and self.circle_parent:
+            QTimer.singleShot(100, lambda: None)  # Dar tempo ao banco
         self.show_atalhos_tab()
     
     def add_template(self):
@@ -2027,9 +2090,13 @@ class EditableActionsList(QWidget):
         """Editar ação de clique"""
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox, QRadioButton, QButtonGroup
         
-        dialog = QDialog(self)
+        dialog = QDialog()  # Sem parent para não fechar com a janela pai
         dialog.setWindowTitle('Editar Clique')
         dialog.setFixedWidth(300)
+        dialog.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
         
         layout = QVBoxLayout()
         
@@ -2039,11 +2106,9 @@ class EditableActionsList(QWidget):
         btn_group = QButtonGroup(dialog)
         radio_esquerdo = QRadioButton('Botão Esquerdo')
         radio_direito = QRadioButton('Botão Direito')
-        
         btn_group.addButton(radio_esquerdo)
         btn_group.addButton(radio_direito)
         
-        # Selecionar baseado no tipo atual
         if acao['type'] == 'right_click':
             radio_direito.setChecked(True)
         else:
@@ -2052,7 +2117,6 @@ class EditableActionsList(QWidget):
         layout.addWidget(radio_esquerdo)
         layout.addWidget(radio_direito)
         
-        # Número de cliques (só para esquerdo)
         layout.addWidget(QLabel('\nQuantos cliques?'))
         spin_vezes = QSpinBox()
         spin_vezes.setMinimum(1)
@@ -2060,69 +2124,61 @@ class EditableActionsList(QWidget):
         spin_vezes.setValue(acao.get('vezes', 1))
         layout.addWidget(spin_vezes)
         
-        # Posição atual (label que será atualizado)
         label_pos = QLabel(f'\nPosição atual: ({acao["x"]}, {acao["y"]})')
         layout.addWidget(label_pos)
         
-        # Spinboxes ocultos apenas para armazenar valores
         spin_x = QSpinBox()
         spin_x.setMinimum(0)
         spin_x.setMaximum(10000)
         spin_x.setValue(acao['x'])
-        spin_x.hide()
+        layout.addWidget(spin_x)
+        spin_x.setVisible(False)
         
         spin_y = QSpinBox()
         spin_y.setMinimum(0)
         spin_y.setMaximum(10000)
         spin_y.setValue(acao['y'])
-        spin_y.hide()
+        layout.addWidget(spin_y)
+        spin_y.setVisible(False)
         
-        # Função para atualizar label quando spinbox muda
         def update_label():
             label_pos.setText(f'\nPosição atual: ({spin_x.value()}, {spin_y.value()})')
         
         spin_x.valueChanged.connect(update_label)
         spin_y.valueChanged.connect(update_label)
         
-        # Botão para recapturar posição
         btn_recapture = QPushButton('📍 Recapturar Posição')
         btn_recapture.setStyleSheet("""
-            QPushButton {
-                background-color: #406e54;
-                color: white;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #355a45;
-            }
+            QPushButton { background-color: #406e54; color: white; padding: 8px; border-radius: 4px; font-weight: bold; }
+            QPushButton:hover { background-color: #355a45; }
         """)
         btn_recapture.clicked.connect(lambda: self.recapture_position(dialog, spin_x, spin_y))
         layout.addWidget(btn_recapture)
         
-        # Botões
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        
         dialog.setLayout(layout)
         
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            # Atualizar tipo baseado no radio button
+        # Usar accepted/rejected em vez de exec()
+        def on_accepted():
+            print(f"DEBUG salvando: spin_x={spin_x.value()}, spin_y={spin_y.value()}")
             if radio_direito.isChecked():
                 self.acoes[index]['type'] = 'right_click'
-                # Remover vezes se for clique direito
                 if 'vezes' in self.acoes[index]:
                     del self.acoes[index]['vezes']
             else:
                 self.acoes[index]['type'] = 'click'
                 self.acoes[index]['vezes'] = spin_vezes.value()
-            
             self.acoes[index]['x'] = spin_x.value()
             self.acoes[index]['y'] = spin_y.value()
+            print(f"DEBUG acao salva: {self.acoes[index]}")
             self.refresh_list()
+        
+        buttons.accepted.connect(on_accepted)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        dialog.exec()
     
     def edit_right_click_action(self, index, acao):
         """Editar ação de clique direito"""
@@ -2138,18 +2194,20 @@ class EditableActionsList(QWidget):
         label_pos = QLabel(f'Posição atual: ({acao["x"]}, {acao["y"]})')
         layout.addWidget(label_pos)
         
-        # Spinboxes ocultos apenas para armazenar valores
+        # Spinboxes adicionados ao layout para garantir referência (mas invisíveis)
         spin_x = QSpinBox()
         spin_x.setMinimum(0)
         spin_x.setMaximum(10000)
         spin_x.setValue(acao['x'])
-        spin_x.hide()
+        layout.addWidget(spin_x)
+        spin_x.setVisible(False)
         
         spin_y = QSpinBox()
         spin_y.setMinimum(0)
         spin_y.setMaximum(10000)
         spin_y.setValue(acao['y'])
-        spin_y.hide()
+        layout.addWidget(spin_y)
+        spin_y.setVisible(False)
         
         # Função para atualizar label
         def update_label():
@@ -2192,45 +2250,47 @@ class EditableActionsList(QWidget):
         """Editar ação de arrastar"""
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
         
-        dialog = QDialog(self)
+        dialog = QDialog()  # Sem parent
         dialog.setWindowTitle('Editar Arraste')
         dialog.setFixedWidth(320)
+        dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
         
         layout = QVBoxLayout()
         
-        # Posições atuais (labels que serão atualizados)
         label_inicio = QLabel(f'Início: ({acao["x1"]}, {acao["y1"]})')
         layout.addWidget(label_inicio)
         
         label_fim = QLabel(f'Fim: ({acao["x2"]}, {acao["y2"]})')
         layout.addWidget(label_fim)
         
-        # Spinboxes ocultos apenas para armazenar valores
         spin_x1 = QSpinBox()
         spin_x1.setMinimum(0)
         spin_x1.setMaximum(10000)
         spin_x1.setValue(acao['x1'])
-        spin_x1.hide()
+        layout.addWidget(spin_x1)
+        spin_x1.setVisible(False)
         
         spin_y1 = QSpinBox()
         spin_y1.setMinimum(0)
         spin_y1.setMaximum(10000)
         spin_y1.setValue(acao['y1'])
-        spin_y1.hide()
+        layout.addWidget(spin_y1)
+        spin_y1.setVisible(False)
         
         spin_x2 = QSpinBox()
         spin_x2.setMinimum(0)
         spin_x2.setMaximum(10000)
         spin_x2.setValue(acao['x2'])
-        spin_x2.hide()
+        layout.addWidget(spin_x2)
+        spin_x2.setVisible(False)
         
         spin_y2 = QSpinBox()
         spin_y2.setMinimum(0)
         spin_y2.setMaximum(10000)
         spin_y2.setValue(acao['y2'])
-        spin_y2.hide()
+        layout.addWidget(spin_y2)
+        spin_y2.setVisible(False)
         
-        # Função para atualizar labels
         def update_labels():
             label_inicio.setText(f'Início: ({spin_x1.value()}, {spin_y1.value()})')
             label_fim.setText(f'Fim: ({spin_x2.value()}, {spin_y2.value()})')
@@ -2240,37 +2300,30 @@ class EditableActionsList(QWidget):
         spin_x2.valueChanged.connect(update_labels)
         spin_y2.valueChanged.connect(update_labels)
         
-        # Botão para recapturar
         btn_recapture = QPushButton('📍 Recapturar Arraste')
         btn_recapture.setStyleSheet("""
-            QPushButton {
-                background-color: #406e54;
-                color: white;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #355a45;
-            }
+            QPushButton { background-color: #406e54; color: white; padding: 8px; border-radius: 4px; font-weight: bold; }
+            QPushButton:hover { background-color: #355a45; }
         """)
         btn_recapture.clicked.connect(lambda: self.recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2))
         layout.addWidget(btn_recapture)
         
-        # Botões
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        
         dialog.setLayout(layout)
         
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        def on_accepted():
             self.acoes[index]['x1'] = spin_x1.value()
             self.acoes[index]['y1'] = spin_y1.value()
             self.acoes[index]['x2'] = spin_x2.value()
             self.acoes[index]['y2'] = spin_y2.value()
             self.refresh_list()
+        
+        buttons.accepted.connect(on_accepted)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        dialog.exec()
     
     def edit_sleep_action(self, index, acao):
         """Editar ação de espera"""
@@ -2322,9 +2375,6 @@ class EditableActionsList(QWidget):
     def recapture_position(self, dialog, spin_x, spin_y):
         """Recapturar posição do mouse"""
         dialog.hide()
-        # Minimizar janela principal também
-        if self.parent_window:
-            self.parent_window.showMinimized()
         
         self.recapture_overlay = ClickCaptureOverlay()
         self.recapture_overlay.coordinate_captured.connect(lambda x, y: self.on_recapture_position(dialog, spin_x, spin_y, x, y))
@@ -2332,28 +2382,19 @@ class EditableActionsList(QWidget):
     
     def on_recapture_position(self, dialog, spin_x, spin_y, x, y):
         """Callback após recapturar posição"""
+        print(f"DEBUG on_recapture_position: x={x}, y={y}")
         spin_x.setValue(int(x))
         spin_y.setValue(int(y))
-        
-        # Restaurar janela principal
-        if self.parent_window:
-            self.parent_window.showNormal()
-            self.parent_window.raise_()
-            self.parent_window.activateWindow()
+        print(f"DEBUG spin depois: {spin_x.value()}, {spin_y.value()}")
         
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        
-        # Limpar overlay
         self.recapture_overlay = None
     
     def recapture_drag(self, dialog, spin_x1, spin_y1, spin_x2, spin_y2):
         """Recapturar arraste"""
         dialog.hide()
-        # Minimizar janela principal também
-        if self.parent_window:
-            self.parent_window.showMinimized()
         
         self.recapture_overlay = DragCaptureOverlay()
         self.recapture_overlay.drag_captured.connect(lambda x1, y1, x2, y2: self.on_recapture_drag(dialog, spin_x1, spin_y1, spin_x2, spin_y2, x1, y1, x2, y2))
@@ -2366,17 +2407,9 @@ class EditableActionsList(QWidget):
         spin_x2.setValue(x2)
         spin_y2.setValue(y2)
         
-        # Restaurar janela principal
-        if self.parent_window:
-            self.parent_window.showNormal()
-            self.parent_window.raise_()
-            self.parent_window.activateWindow()
-        
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        
-        # Limpar overlay
         self.recapture_overlay = None
         dialog.show()
         dialog.raise_()
@@ -2558,19 +2591,21 @@ class ActionItemWidget(QWidget):
         
         layout.addLayout(move_layout)
         
-        # Texto da ação - para sleep, usar campo editável
+        # Layout vertical: texto + observação
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.setContentsMargins(0, 0, 0, 0)
+        
+        # Texto da ação - para sleep, usar campo editável inline
         if self.acao['type'] == 'sleep':
-            # Layout para sleep editável
             sleep_layout = QHBoxLayout()
-            sleep_layout.setSpacing(0)  # Sem espaçamento extra
+            sleep_layout.setSpacing(0)
             sleep_layout.setContentsMargins(0, 0, 0, 0)
             
-            # Número do item + "Esperar "
             numero_label = QLabel(f"{self.index + 1}. Esperar ")
             numero_label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500;')
-            sleep_layout.addWidget(numero_label, 0)  # 0 = não expande
+            sleep_layout.addWidget(numero_label, 0)
             
-            # Campo editável para ms
             self.ms_input = QLineEdit(str(self.acao['ms']))
             self.ms_input.setFixedWidth(60)
             self.ms_input.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -2596,20 +2631,71 @@ class ActionItemWidget(QWidget):
             self.ms_input.editingFinished.connect(self.save_sleep_edit)
             sleep_layout.addWidget(self.ms_input, 0)
             
-            # Texto "ms (Xs)" - sem espaço antes
             segundos = self.acao['ms'] / 1000.0
             self.suffix_label = QLabel(f"ms ({segundos:.1f}s)")
             self.suffix_label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500; margin-left: 0px; padding-left: 0px;')
             sleep_layout.addWidget(self.suffix_label, 0)
-            
-            sleep_layout.addStretch(1)  # Stretch no final para empurrar tudo para esquerda
-            layout.addLayout(sleep_layout, 1)  # 1 = expande para preencher
+            sleep_layout.addStretch(1)
+            text_col.addLayout(sleep_layout)
         else:
-            # Texto normal para outras ações
             texto = self.get_action_text()
             self.label = QLabel(texto)
             self.label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500;')
-            layout.addWidget(self.label, stretch=1)
+            text_col.addWidget(self.label)
+        
+        # Campo de observação (editável com duplo clique)
+        obs_texto = self.acao.get('obs', '')
+        self.obs_input = QLineEdit(obs_texto)
+        self.obs_input.setPlaceholderText('Duplo clique para adicionar observação...')
+        self.obs_input.setStyleSheet("""
+            QLineEdit {
+                color: #aaa;
+                font-size: 11px;
+                font-style: italic;
+                background-color: transparent;
+                border: none;
+                border-bottom: 1px solid transparent;
+                padding: 0px;
+                margin: 0px;
+            }
+            QLineEdit:focus {
+                color: #ccc;
+                border-bottom: 1px solid #88c22b;
+                background-color: rgba(136, 194, 43, 0.05);
+            }
+        """)
+        self.obs_input.setReadOnly(True)
+        self.obs_input.mouseDoubleClickEvent = lambda e: self.enable_obs_edit()
+        self.obs_input.returnPressed.connect(self.save_obs)
+        self.obs_input.editingFinished.connect(self.save_obs)
+        # Mostrar campo se já tem texto
+        if not obs_texto:
+            self.obs_input.hide()
+        text_col.addWidget(self.obs_input)
+        
+        layout.addLayout(text_col, stretch=1)
+        
+        # Botão de observação 💬 (sempre visível, antes de editar/deletar)
+        self.btn_obs = QPushButton('💬')
+        self.btn_obs.setFixedSize(24, 24)
+        obs_atual = self.acao.get('obs', '')
+        self.btn_obs.setToolTip(obs_atual if obs_atual else 'Adicionar observação')
+        self.btn_obs.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {'#88c22b' if obs_atual else '#555'};
+                border: none;
+                border-radius: 4px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(136, 194, 43, 0.15);
+                color: #88c22b;
+            }}
+        """)
+        self.btn_obs.clicked.connect(self.on_obs_clicked)
+        self.btn_obs.hide()
+        layout.addWidget(self.btn_obs)
         
         # Botões de ação (inicialmente ocultos)
         self.btn_edit = QPushButton('✎')
@@ -2651,6 +2737,23 @@ class ActionItemWidget(QWidget):
         self.setLayout(layout)
         self.setMinimumHeight(45)
     
+    def enable_obs_edit(self):
+        """Habilitar edição da observação"""
+        self.obs_input.setReadOnly(False)
+        self.obs_input.show()
+        self.obs_input.setFocus()
+        self.obs_input.selectAll()
+    
+    def save_obs(self):
+        """Salvar observação"""
+        texto = self.obs_input.text().strip()
+        self.parent_list.acoes[self.index]['obs'] = texto
+        self.obs_input.setReadOnly(True)
+        if not texto:
+            self.obs_input.hide()
+        else:
+            self.obs_input.show()
+    
     def get_action_text(self):
         """Obter texto descritivo da ação"""
         acao = self.acao
@@ -2676,17 +2779,56 @@ class ActionItemWidget(QWidget):
     
     def enterEvent(self, event):
         """Mostrar botões ao passar mouse"""
+        self.btn_obs.show()
         self.btn_edit.show()
         self.btn_delete.show()
     
     def leaveEvent(self, event):
         """Ocultar botões ao sair mouse"""
+        self.btn_obs.hide()
         self.btn_edit.hide()
         self.btn_delete.hide()
     
     def on_edit_clicked(self):
         """Callback botão editar"""
         self.parent_list.edit_acao(self.index)
+    
+    def on_obs_clicked(self):
+        """Mostrar campo de observação inline para edição"""
+        self.obs_input.show()
+        self.obs_input.setReadOnly(False)
+        self.obs_input.setFocus()
+        self.obs_input.selectAll()
+    
+    def enable_obs_edit(self):
+        """Habilitar edição da observação com duplo clique"""
+        self.obs_input.setReadOnly(False)
+        self.obs_input.setFocus()
+        self.obs_input.selectAll()
+    
+    def save_obs(self):
+        """Salvar observação"""
+        obs = self.obs_input.text().strip()
+        self.parent_list.acoes[self.index]['obs'] = obs
+        self.obs_input.setReadOnly(True)
+        if not obs:
+            self.obs_input.hide()
+        else:
+            self.obs_input.show()
+        # Atualizar ícone do botão
+        self.btn_obs.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {'#88c22b' if obs else '#555'};
+                border: none;
+                border-radius: 4px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(136, 194, 43, 0.15);
+                color: #88c22b;
+            }}
+        """)
     
     def on_delete_clicked(self):
         """Callback botão deletar"""
@@ -3060,12 +3202,55 @@ class AddShortcutWindow(QWidget):
             return
         
         if self.shortcut_id:
+            # Editando - verificar conflito excluindo o próprio
+            conflitos = self.db.get_conflito_tecla(tecla_atalho, excluir_id=self.shortcut_id) if tecla_atalho else []
+        else:
+            # Criando novo
+            conflitos = self.db.get_conflito_tecla(tecla_atalho) if tecla_atalho else []
+        
+        # Se há conflito, mostrar aviso
+        if conflitos:
+            nomes_conflito = ', '.join([f'"{c[1]}"' for c in conflitos])
+            ativos_conflito = [c for c in conflitos if c[2] == 1]
+            
+            msg = QMessageBox()
+            msg.setWindowTitle('Tecla já em uso')
+            msg.setWindowFlags(msg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+            
+            if ativos_conflito:
+                msg.setText(
+                    f'O atalho "Alt + {tecla_atalho}" já está sendo usado por: {nomes_conflito}.\n\n'
+                    f'Ao salvar, o(s) atalho(s) conflitante(s) serão desativados automaticamente.'
+                )
+            else:
+                msg.setText(
+                    f'O atalho "Alt + {tecla_atalho}" também está definido em: {nomes_conflito} (inativo).\n\n'
+                    f'Se ativado, o outro será desativado automaticamente.'
+                )
+            
+            btn_salvar = msg.addButton('Salvar assim mesmo', QMessageBox.ButtonRole.AcceptRole)
+            btn_cancelar = msg.addButton('Cancelar', QMessageBox.ButtonRole.RejectRole)
+            msg.setDefaultButton(btn_cancelar)
+            msg.exec()
+            
+            if msg.clickedButton() != btn_salvar:
+                return
+        
+        if self.shortcut_id:
             # Editando
             self.db.update_shortcut(self.shortcut_id, nome, acoes, tecla_atalho)
+            # Desativar conflitos da tecla (o atalho editado fica ativo)
+            if tecla_atalho:
+                self.db.desativar_conflitos_tecla(tecla_atalho, excluir_id=self.shortcut_id)
             msg = 'Atalho atualizado!'
         else:
             # Criando novo
             self.db.add_shortcut(nome, acoes, tecla_atalho)
+            # Desativar conflitos (novo fica ativo, antigo desativa)
+            if tecla_atalho:
+                # Pegar o id do novo atalho
+                novo_id = self.db.conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+                self.db.desativar_conflitos_tecla(tecla_atalho, excluir_id=novo_id)
             msg = 'Atalho salvo!'
         
         notification = NotificationWidget(f'✓ {msg}')
