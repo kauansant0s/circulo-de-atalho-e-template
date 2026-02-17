@@ -5,7 +5,7 @@ import json
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
                               QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty
 from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient
 from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
@@ -760,7 +760,40 @@ class FloatingCircle(QWidget):
         self.click_position = QPoint()
         self.menu = None
         self.menu_open = False  # Controlar se menu está aberto
+        
+        # Propriedades para animação
+        self._scale = 0.85  # Iniciar 15% menor (85%)
+        self._opacity_value = 0.6  # Iniciar com 60% opacidade
+        
         self.init_ui()
+        
+        # Criar animações
+        self.scale_animation = QPropertyAnimation(self, b"scale")
+        self.scale_animation.setDuration(200)  # 200ms
+        self.scale_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        self.opacity_animation = QPropertyAnimation(self, b"opacity_value")
+        self.opacity_animation.setDuration(200)
+        self.opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+    
+    # Propriedades animáveis
+    @pyqtProperty(float)
+    def scale(self):
+        return self._scale
+    
+    @scale.setter
+    def scale(self, value):
+        self._scale = value
+        self.update()  # Redesenhar
+    
+    @pyqtProperty(float)
+    def opacity_value(self):
+        return self._opacity_value
+    
+    @opacity_value.setter
+    def opacity_value(self, value):
+        self._opacity_value = value
+        self.setWindowOpacity(value)
     
     def init_ui(self):
         self.setWindowFlags(
@@ -787,8 +820,13 @@ class FloatingCircle(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Aplicar escala no centro
         center_x = self.width() / 2
         center_y = self.height() / 2
+        
+        painter.translate(center_x, center_y)
+        painter.scale(self._scale, self._scale)
+        painter.translate(-center_x, -center_y)
         
         # Fundo externo gradiente (sombra suave)
         gradient = QRadialGradient(center_x, center_y, 40)
@@ -799,27 +837,27 @@ class FloatingCircle(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(0, 0, 80, 80)
         
-        # Anel externo (cinza escuro)
+        # Anel externo (cinza escuro) - espaçamento reduzido
         painter.setPen(QPen(QColor(80, 80, 80), 3))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(8, 8, 64, 64)
         
-        # Anel médio (cinza médio)
+        # Anel médio (cinza médio) - mais próximo
         painter.setPen(QPen(QColor(120, 120, 120), 2.5))
-        painter.drawEllipse(14, 14, 52, 52)
+        painter.drawEllipse(12, 12, 56, 56)  # Era 14,14,52,52
         
-        # Anel interno (cinza claro)
+        # Anel interno (cinza claro) - mais próximo
         painter.setPen(QPen(QColor(160, 160, 160), 2))
-        painter.drawEllipse(19, 19, 42, 42)
+        painter.drawEllipse(16, 16, 48, 48)  # Era 19,19,42,42
         
-        # Centro branco
-        gradient_center = QRadialGradient(center_x, center_y, 18)
+        # Centro branco - levemente maior
+        gradient_center = QRadialGradient(center_x, center_y, 21)  # Era 18
         gradient_center.setColorAt(0, QColor(255, 255, 255, 255))
         gradient_center.setColorAt(0.8, QColor(240, 240, 240, 255))
         gradient_center.setColorAt(1, QColor(220, 220, 220, 255))
         painter.setBrush(gradient_center)
         painter.setPen(QPen(QColor(180, 180, 180), 1))
-        painter.drawEllipse(22, 22, 36, 36)
+        painter.drawEllipse(20, 20, 40, 40)  # Era 22,22,36,36
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -858,49 +896,155 @@ class FloatingCircle(QWidget):
         if self.menu:
             print(f"Círculo: Menu está visível? {self.menu.isVisible()}")
         
-        # Se o menu já está aberto, apenas fechar
+        # Se o menu já está aberto, fechar com animação reversa
         if self.menu and self.menu.isVisible():
-            print("Círculo: Menu já está aberto, fechando...")
-            self.menu.close()
-            self.menu = None
-            self.menu_open = False
-            # Voltar para 60% opacidade
-            self.setWindowOpacity(0.6)
+            print("Círculo: Menu já está aberto, fechando com animação...")
+            
+            try:
+                # Animação reversa: slide de volta para o círculo + fade out
+                circle_pos = QPoint(self.x(), self.y())
+                
+                self.menu_close_slide = QPropertyAnimation(self.menu, b"pos")
+                self.menu_close_slide.setDuration(200)
+                self.menu_close_slide.setStartValue(self.menu.pos())
+                self.menu_close_slide.setEndValue(circle_pos)
+                self.menu_close_slide.setEasingCurve(QEasingCurve.Type.InCubic)
+                
+                self.menu_close_fade = QPropertyAnimation(self.menu, b"windowOpacity")
+                self.menu_close_fade.setDuration(200)
+                self.menu_close_fade.setStartValue(1.0)
+                self.menu_close_fade.setEndValue(0.0)
+                
+                # Quando terminar, fechar de verdade
+                def on_close_finished():
+                    if self.menu:
+                        self.menu.close()
+                        self.menu = None
+                    self.menu_open = False
+                
+                self.menu_close_fade.finished.connect(on_close_finished)
+                
+                self.menu_close_slide.start()
+                self.menu_close_fade.start()
+                
+                print("Círculo: Animação de fechamento iniciada")
+            except Exception as e:
+                # Se animação falhar, fechar normalmente
+                print(f"Erro na animação de fechamento: {e}")
+                self.menu.close()
+                self.menu = None
+                self.menu_open = False
+            
+            # Círculo volta para 85% e 60%
+            self.scale_animation.stop()
+            self.scale_animation.setDuration(200)
+            self.scale_animation.setStartValue(self._scale)
+            self.scale_animation.setEndValue(0.85)
+            self.scale_animation.start()
+            
+            self.opacity_animation.stop()
+            self.opacity_animation.setDuration(200)
+            self.opacity_animation.setStartValue(self._opacity_value)
+            self.opacity_animation.setEndValue(0.6)
+            self.opacity_animation.start()
             return
         
-        # Caso contrário, abrir novo menu
+        # Abrir novo menu
         print("Círculo: Abrindo novo menu...")
         if self.menu:
             self.menu.close()
         
-        self.menu = MainMenu(self.db, self)
         self.menu_open = True
-        # Menu aberto: 100% opacidade
-        self.setWindowOpacity(1.0)
         
-        # Conectar evento de fechar para limpar referência e resetar opacidade
+        # Criar menu
+        self.menu = MainMenu(self.db, self)
+        
+        # Conectar evento de fechar
         def on_menu_closed():
             self.menu = None
             self.menu_open = False
-            self.setWindowOpacity(0.6)
         
         self.menu.destroyed.connect(on_menu_closed)
         
+        # Posição final do menu
         menu_x = self.x() - 360
         menu_y = self.y()
-        self.menu.move(menu_x, menu_y)
-        self.menu.show()
-        print("Círculo: Menu mostrado")
+        
+        # Tentar animação, mas garantir que menu apareça
+        try:
+            # Começar na posição do círculo
+            circle_pos = QPoint(self.x(), self.y())
+            final_pos = QPoint(menu_x, menu_y)
+            
+            self.menu.move(circle_pos)
+            self.menu.setWindowOpacity(0.0)
+            self.menu.show()
+            self.menu.raise_()
+            
+            # Animação: slide para esquerda + fade in
+            self.menu_slide_anim = QPropertyAnimation(self.menu, b"pos")
+            self.menu_slide_anim.setDuration(250)
+            self.menu_slide_anim.setStartValue(circle_pos)
+            self.menu_slide_anim.setEndValue(final_pos)
+            self.menu_slide_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+            self.menu_fade_anim = QPropertyAnimation(self.menu, b"windowOpacity")
+            self.menu_fade_anim.setDuration(250)
+            self.menu_fade_anim.setStartValue(0.0)
+            self.menu_fade_anim.setEndValue(1.0)
+            
+            self.menu_slide_anim.start()
+            self.menu_fade_anim.start()
+            
+            print("Círculo: Menu animação iniciada")
+        except Exception as e:
+            # Se animação falhar, mostrar menu normalmente
+            print(f"Erro na animação: {e}")
+            self.menu.move(menu_x, menu_y)
+            self.menu.setWindowOpacity(1.0)
+            self.menu.show()
+            self.menu.raise_()
+        
+        # Animações do círculo
+        self.scale_animation.stop()
+        self.scale_animation.setDuration(150)
+        self.scale_animation.setStartValue(self._scale)
+        self.scale_animation.setEndValue(1.0)
+        self.scale_animation.start()
+        
+        self.opacity_animation.stop()
+        self.opacity_animation.setDuration(150)
+        self.opacity_animation.setStartValue(self._opacity_value)
+        self.opacity_animation.setEndValue(1.0)
+        self.opacity_animation.start()
     
     def enterEvent(self, event):
-        """Mouse entrou no círculo - aumentar opacidade"""
+        """Mouse entrou no círculo - aumentar escala e opacidade"""
         if not self.menu_open:
-            self.setWindowOpacity(1.0)
+            # Animar para tamanho normal (100%) e opaco
+            self.scale_animation.stop()
+            self.scale_animation.setStartValue(self._scale)
+            self.scale_animation.setEndValue(1.0)
+            self.scale_animation.start()
+            
+            self.opacity_animation.stop()
+            self.opacity_animation.setStartValue(self._opacity_value)
+            self.opacity_animation.setEndValue(1.0)
+            self.opacity_animation.start()
     
     def leaveEvent(self, event):
-        """Mouse saiu do círculo - voltar para opacidade normal"""
+        """Mouse saiu do círculo - voltar para escala/opacidade reduzida"""
         if not self.menu_open:
-            self.setWindowOpacity(0.6)
+            # Animar para 85% e 60% opacidade
+            self.scale_animation.stop()
+            self.scale_animation.setStartValue(self._scale)
+            self.scale_animation.setEndValue(0.85)
+            self.scale_animation.start()
+            
+            self.opacity_animation.stop()
+            self.opacity_animation.setStartValue(self._opacity_value)
+            self.opacity_animation.setEndValue(0.6)
+            self.opacity_animation.start()
 
 
 class MainMenu(QWidget):
@@ -912,10 +1056,39 @@ class MainMenu(QWidget):
         self.init_ui()
     
     def closeEvent(self, event):
-        """Ao fechar menu, resetar opacidade do círculo"""
+        """Ao fechar menu, resetar círculo com animação"""
         if self.circle_parent:
             self.circle_parent.menu_open = False
-            self.circle_parent.setWindowOpacity(0.6)
+            # Animação de volta para 85% e 60%
+            self.circle_parent.scale_animation.stop()
+            self.circle_parent.scale_animation.setDuration(200)
+            self.circle_parent.scale_animation.setStartValue(self.circle_parent._scale)
+            self.circle_parent.scale_animation.setEndValue(0.85)
+            self.circle_parent.scale_animation.start()
+            
+            self.circle_parent.opacity_animation.stop()
+            self.circle_parent.opacity_animation.setDuration(200)
+            self.circle_parent.opacity_animation.setStartValue(self.circle_parent._opacity_value)
+            self.circle_parent.opacity_animation.setEndValue(0.6)
+            self.circle_parent.opacity_animation.start()
+        event.accept()
+    
+    def hideEvent(self, event):
+        """Ao esconder menu, também resetar círculo com animação"""
+        if self.circle_parent:
+            self.circle_parent.menu_open = False
+            # Animação de volta para 85% e 60%
+            self.circle_parent.scale_animation.stop()
+            self.circle_parent.scale_animation.setDuration(200)
+            self.circle_parent.scale_animation.setStartValue(self.circle_parent._scale)
+            self.circle_parent.scale_animation.setEndValue(0.85)
+            self.circle_parent.scale_animation.start()
+            
+            self.circle_parent.opacity_animation.stop()
+            self.circle_parent.opacity_animation.setDuration(200)
+            self.circle_parent.opacity_animation.setStartValue(self.circle_parent._opacity_value)
+            self.circle_parent.opacity_animation.setEndValue(0.6)
+            self.circle_parent.opacity_animation.start()
         event.accept()
     
     def init_ui(self):
@@ -2385,11 +2558,58 @@ class ActionItemWidget(QWidget):
         
         layout.addLayout(move_layout)
         
-        # Texto da ação
-        texto = self.get_action_text()
-        self.label = QLabel(texto)
-        self.label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500;')
-        layout.addWidget(self.label, stretch=1)
+        # Texto da ação - para sleep, usar campo editável
+        if self.acao['type'] == 'sleep':
+            # Layout para sleep editável
+            sleep_layout = QHBoxLayout()
+            sleep_layout.setSpacing(0)  # Sem espaçamento extra
+            sleep_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Número do item + "Esperar "
+            numero_label = QLabel(f"{self.index + 1}. Esperar ")
+            numero_label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500;')
+            sleep_layout.addWidget(numero_label, 0)  # 0 = não expande
+            
+            # Campo editável para ms
+            self.ms_input = QLineEdit(str(self.acao['ms']))
+            self.ms_input.setFixedWidth(60)
+            self.ms_input.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self.ms_input.setStyleSheet("""
+                QLineEdit {
+                    color: #e0e0e0;
+                    font-size: 13px;
+                    font-weight: 500;
+                    background-color: transparent;
+                    border: none;
+                    border-bottom: 1px solid transparent;
+                    padding: 0px;
+                    margin: 0px;
+                }
+                QLineEdit:focus {
+                    border-bottom: 1px solid #88c22b;
+                    background-color: rgba(136, 194, 43, 0.1);
+                }
+            """)
+            self.ms_input.setReadOnly(True)
+            self.ms_input.mouseDoubleClickEvent = lambda e: self.enable_edit()
+            self.ms_input.returnPressed.connect(self.save_sleep_edit)
+            self.ms_input.editingFinished.connect(self.save_sleep_edit)
+            sleep_layout.addWidget(self.ms_input, 0)
+            
+            # Texto "ms (Xs)" - sem espaço antes
+            segundos = self.acao['ms'] / 1000.0
+            self.suffix_label = QLabel(f"ms ({segundos:.1f}s)")
+            self.suffix_label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500; margin-left: 0px; padding-left: 0px;')
+            sleep_layout.addWidget(self.suffix_label, 0)
+            
+            sleep_layout.addStretch(1)  # Stretch no final para empurrar tudo para esquerda
+            layout.addLayout(sleep_layout, 1)  # 1 = expande para preencher
+        else:
+            # Texto normal para outras ações
+            texto = self.get_action_text()
+            self.label = QLabel(texto)
+            self.label.setStyleSheet('color: #e0e0e0; font-size: 13px; font-weight: 500;')
+            layout.addWidget(self.label, stretch=1)
         
         # Botões de ação (inicialmente ocultos)
         self.btn_edit = QPushButton('✎')
@@ -2497,6 +2717,33 @@ class ActionItemWidget(QWidget):
         """Mover ação para baixo (uma posição)"""
         if self.index < len(self.parent_list.acoes) - 1:
             self.parent_list.move_acao(self.index, self.index + 1)
+    
+    def enable_edit(self):
+        """Habilitar edição do campo de ms (duplo clique)"""
+        if hasattr(self, 'ms_input'):
+            self.ms_input.setReadOnly(False)
+            self.ms_input.setFocus()
+            self.ms_input.selectAll()
+    
+    def save_sleep_edit(self):
+        """Salvar novo valor de ms editado"""
+        if hasattr(self, 'ms_input'):
+            try:
+                novo_ms = int(self.ms_input.text())
+                if 100 <= novo_ms <= 60000:  # Validar range
+                    self.parent_list.acoes[self.index]['ms'] = novo_ms
+                    # Atualizar sufixo
+                    segundos = novo_ms / 1000.0
+                    self.suffix_label.setText(f"ms ({segundos:.1f}s)")
+                    self.ms_input.setReadOnly(True)
+                else:
+                    # Valor inválido - restaurar original
+                    self.ms_input.setText(str(self.parent_list.acoes[self.index]['ms']))
+                    self.ms_input.setReadOnly(True)
+            except ValueError:
+                # Não é número - restaurar original
+                self.ms_input.setText(str(self.parent_list.acoes[self.index]['ms']))
+                self.ms_input.setReadOnly(True)
 
 
 class AddShortcutWindow(QWidget):
