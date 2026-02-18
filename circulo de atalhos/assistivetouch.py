@@ -1564,6 +1564,13 @@ class FloatingCircle(QWidget):
         self.db = db
         self.firebase = firebase
         self.user_data = user_data
+        
+        print("DEBUG FloatingCircle: __init__ chamado")
+        print(f"DEBUG: db = {db}")
+        print(f"DEBUG: firebase = {firebase}")
+        print(f"DEBUG: user_data = {user_data}")
+        
+        self.dragging = False
         self.dragging = False
         self.drag_start_position = QPoint()
         self.click_position = QPoint()
@@ -1571,8 +1578,12 @@ class FloatingCircle(QWidget):
         self.menu_open = False  # Controlar se menu está aberto
         
         # Propriedades para animação
-        self._scale = 0.85  # Iniciar 15% menor (85%)
-        self._opacity_value = 0.6  # Iniciar com 60% opacidade
+        # self._scale = 0.85  # Iniciar 15% menor (85%)
+        # self._opacity_value = 0.6  # Iniciar com 60% opacidade
+
+        # Propriedades para animação (TESTE: começar 100% visível)
+        self._scale = 1.0  # Tamanho normal
+        self._opacity_value = 1.0  # 100% visível
         
         self.init_ui()
         
@@ -1605,24 +1616,42 @@ class FloatingCircle(QWidget):
         self.setWindowOpacity(value)
     
     def init_ui(self):
+        print("DEBUG FloatingCircle: init_ui chamado")
+
         self.setWindowFlags(
+            Qt.WindowType.Window |
             Qt.WindowType.FramelessWindowHint | 
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
+            Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         self.setFixedSize(80, 80)
         
         # Opacidade inicial: 60%
-        self.setWindowOpacity(0.6)
+        # self.setWindowOpacity(0.6)
+
+        # Opacidade inicial: 100% (TESTE)
+        self.setWindowOpacity(1.0)
         
         # SEMPRE iniciar no canto superior direito (ignorar posição salva)
         screen = QApplication.primaryScreen().geometry()
-        # Posição: 20px da borda direita, 20px do topo
-        x = screen.width() - 100  # 80px do círculo + 20px de margem
-        y = 20
+        print(f"DEBUG: Resolução da tela: {screen.width()}x{screen.height()}")
+
+        # Forçar posição visível e segura
+        x = screen.width() - 120  # Mais espaço da borda
+        y = 50  # Mais abaixo do topo
         self.move(x, y)
+
+        # CRÍTICO: Garantir que fica sempre no topo
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+        print("DEBUG FloatingCircle: Janela configurada")
+        print(f"DEBUG: Posição: ({x}, {y})")
+        print(f"DEBUG: Tamanho: {self.size()}")
+        print(f"DEBUG: Flags: {self.windowFlags()}")
+
     
     def paintEvent(self, event):
         """Desenhar o círculo com anéis concêntricos"""
@@ -4345,24 +4374,37 @@ class EditTemplateWindow(QWidget):
         # Fechar janela
         self.close()
 
-
 def main():
     app = QApplication(sys.argv)
     
     # Criar instância de autenticação
     firebase = FirebaseAuth()
     
+    # Variável global para manter referência
+    global circle
+    circle = None
+    
     # Mostrar tela de login
     login_window = LoginWindow(firebase)
     
     # Quando login for bem-sucedido, criar o círculo
     def on_login_success(user_data):
+        global circle
+        print(f"DEBUG: Login success! User: {user_data}")
+        
         # Criar database com dados do usuário
         db = Database(user_id=user_data['uid'], user_setor=user_data['setor'])
         
         # Criar círculo com usuário logado
         circle = FloatingCircle(db, firebase, user_data)
         circle.show()
+        circle.raise_()  # Trazer para frente
+        circle.activateWindow()  # Ativar
+        circle.setWindowState(circle.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+
+        print("DEBUG: Círculo criado e mostrado")
+        print(f"DEBUG: isVisible = {circle.isVisible()}")
+        print(f"DEBUG: isActiveWindow = {circle.isActiveWindow()}")
     
     login_window.login_success.connect(on_login_success)
     login_window.show()

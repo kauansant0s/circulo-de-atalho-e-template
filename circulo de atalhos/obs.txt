@@ -6,10 +6,7 @@ para acessar os templates de cada setor, tem uma senha, como se cada setor fosse
 limite de tres teclas para o comando de teclado
 criar uma função de aprender, em que eu faço uma sequência de ações, o programa pega tudo, os cliques, teclas, tempo de espera, textos digitados e coloca todas as ações em ordem pra mim. quando eu clicar no botão aprender, ele minimiza e eu vou fazendo o que eu tenho q fazer, ai qnd eu clico a tecla alt ele para de aprender e cria o atalho pra mim
 adicionar as condições, poder fazer assim: faz uma série de cliques, ai eu adiciono uma condição, se eu clicar alt, ai ele segue com outra série de cliques.
-adicionar o email, caso a pessoa esqueça a senha, ai tem q ter um email de verdade, mas o login ainda é feito com o nome de usuário, só tem q colocar o email na hora de criar a conta e ele só aparece quando clicar em esqueci minha senha na tela de login, tbm trocar a mensagem qnd erra o username ou senha, na msg diz email
-quando muda para true aprovado no firebase, ele ja deveria ir automaticamente para a coleção usuarios?
-ainda n redimensiona a janela de login e cadastro
-criar a parte de senha, individuais e as do setor
+criar a parte de senhas, individuais e as do setor
 poder entrar com enter, no momento não funciona
 tirar todas as menções ao username no código e email_real tbm, afinal agr só tem o email, e tbm as partes que eram para redimensionar a altura tbm
 quando tento fazer login, ele só fecha a janela mas n entra
