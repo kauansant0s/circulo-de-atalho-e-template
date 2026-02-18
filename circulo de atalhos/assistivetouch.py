@@ -314,7 +314,7 @@ class FirebaseAuth:
         self.current_user = None
         self.id_token = None
         
-    def signup(self, email, password, nome, username, setor):
+    def signup(self, email, password, nome, username, setor, email_real):
         """Criar conta (fica pendente de aprovação)"""
         url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.api_key}"
         data = {
@@ -329,9 +329,15 @@ class FirebaseAuth:
             uid = result['localId']
             self.id_token = result['idToken']
             
-            # Salvar dados do usuário pendente
-            self.save_pending_user(uid, nome, username, setor, email)
-            return {'success': True, 'uid': uid}
+            # Verificar se é a primeira conta (nenhum usuário aprovado existe)
+            if self.is_first_user():
+                # Primeira conta: aprovar automaticamente como admin
+                self.approve_user_direct(uid, nome, username, setor, email, is_admin=True)
+                return {'success': True, 'uid': uid, 'first_admin': True}
+            else:
+                # Demais contas: salvar como pendente
+                self.save_pending_user(uid, nome, username, setor, email)
+                return {'success': True, 'uid': uid}
         else:
             error = response.json().get('error', {}).get('message', 'Erro desconhecido')
             return {'success': False, 'error': error}
@@ -372,7 +378,7 @@ class FirebaseAuth:
             print(f"DEBUG exception: {e}")
             return {'success': False, 'error': f'Erro de conexão: {str(e)}'}
     
-    def save_pending_user(self, uid, nome, username, setor, email):
+    def save_pending_user(self, uid, nome, username, setor, email, email_real):
         """Salvar usuário pendente no Firestore"""
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/pending_users/{uid}"
         headers = {"Authorization": f"Bearer {self.id_token}"}
@@ -382,6 +388,7 @@ class FirebaseAuth:
                 "username": {"stringValue": username},
                 "setor": {"stringValue": setor},
                 "email": {"stringValue": email},
+                "email_real": {"stringValue": email_real},
                 "aprovado": {"booleanValue": False}
             }
         }
@@ -409,6 +416,36 @@ class FirebaseAuth:
         """Deslogar"""
         self.current_user = None
         self.id_token = None
+
+    def is_first_user(self):
+        """Verificar se já existe algum usuário aprovado"""
+        url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios"
+        headers = {"Authorization": f"Bearer {self.id_token}"}
+        
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                return len(data.get('documents', [])) == 0  # True se não tem ninguém
+            return True  # Se der erro, assume que é o primeiro
+        except:
+            return True
+
+    def approve_user_direct(self, uid, nome, username, setor, email, is_admin=False):
+        """Aprovar usuário direto (para primeira conta)"""
+        url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios/{uid}"
+        headers = {"Authorization": f"Bearer {self.id_token}"}
+        data = {
+            "fields": {
+                "nome": {"stringValue": nome},
+                "username": {"stringValue": username},
+                "setor": {"stringValue": setor},
+                "email": {"stringValue": email},
+                "aprovado": {"booleanValue": True},
+                "is_admin": {"booleanValue": is_admin}
+            }
+        }
+        requests.patch(url, headers=headers, json=data)
 
     def get_pending_users(self):
         """Buscar usuários aguardando aprovação"""
@@ -461,6 +498,47 @@ class FirebaseAuth:
         headers = {"Authorization": f"Bearer {self.id_token}"}
         requests.delete(url, headers=headers)
         return True
+    
+    def get_approved_users(self):
+        """Buscar usuários já aprovados"""
+        url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios"
+        headers = {"Authorization": f"Bearer {self.id_token}"}
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            users = []
+            for doc in data.get('documents', []):
+                uid = doc['name'].split('/')[-1]
+                fields = doc.get('fields', {})
+                users.append({
+                    'uid': uid,
+                    'nome': fields.get('nome', {}).get('stringValue', ''),
+                    'email': fields.get('email', {}).get('stringValue', ''),
+                    'setor': fields.get('setor', {}).get('stringValue', ''),
+                    'is_admin': fields.get('is_admin', {}).get('booleanValue', False)
+                })
+            return users
+        return []
+
+    def promote_to_admin(self, uid):
+        """Promover usuário a administrador"""
+        url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios/{uid}"
+        headers = {"Authorization": f"Bearer {self.id_token}"}
+        
+        # Buscar dados atuais
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            doc = response.json()
+            fields = doc.get('fields', {})
+            
+            # Atualizar is_admin para true
+            fields['is_admin'] = {"booleanValue": True}
+            
+            # Salvar
+            requests.patch(url, headers=headers, json={"fields": fields})
+            return True
+        return False
 
 class LoginWindow(QWidget):
     """Tela de login/cadastro"""
@@ -473,9 +551,7 @@ class LoginWindow(QWidget):
     
     def init_ui(self):
         self.setWindowTitle('AssistiveTouch - Login')
-        self.resize(400, 1)
-        self.setMinimumWidth(400)
-        self.setMaximumWidth(400)
+        self.setFixedWidth(400)
         self.setWindowFlags(Qt.WindowType.Window)
         
         layout = QVBoxLayout()
@@ -502,10 +578,10 @@ class LoginWindow(QWidget):
         login_tab = QWidget()
         login_layout = QVBoxLayout()
         
-        login_layout.addWidget(QLabel('Username:'))
-        self.login_username = QLineEdit()
-        self.login_username.setPlaceholderText('Seu usuário')
-        login_layout.addWidget(self.login_username)
+        login_layout.addWidget(QLabel('Email:'))
+        self.login_email = QLineEdit()
+        self.login_email.setPlaceholderText('seu@email.com')
+        login_layout.addWidget(self.login_email)
         
         login_layout.addWidget(QLabel('Senha:'))
         self.login_senha = QLineEdit()
@@ -528,6 +604,11 @@ class LoginWindow(QWidget):
         """)
         btn_login.clicked.connect(self.do_login)
         login_layout.addWidget(btn_login)
+
+        esqueci_senha = QLabel('<a href="#" style="color: #406e54;">Esqueci minha senha</a>')
+        esqueci_senha.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        esqueci_senha.linkActivated.connect(self.esqueci_senha)
+        login_layout.addWidget(esqueci_senha)
         
         login_tab.setLayout(login_layout)
         
@@ -538,10 +619,11 @@ class LoginWindow(QWidget):
         cadastro_layout.addWidget(QLabel('Nome Completo:'))
         self.cad_nome = QLineEdit()
         cadastro_layout.addWidget(self.cad_nome)
-        
-        cadastro_layout.addWidget(QLabel('Username:'))
-        self.cad_username = QLineEdit()
-        cadastro_layout.addWidget(self.cad_username)
+
+        cadastro_layout.addWidget(QLabel('Email:'))
+        self.cad_email_real = QLineEdit()
+        self.cad_email_real.setPlaceholderText('seu@email.com')
+        cadastro_layout.addWidget(self.cad_email_real)
         
         cadastro_layout.addWidget(QLabel('Senha:'))
         self.cad_senha = QLineEdit()
@@ -583,19 +665,24 @@ class LoginWindow(QWidget):
         self.tabs.currentChanged.connect(self.adjust_size)
         
         layout.addWidget(self.tabs)
+
+        # Conectar mudança de aba para ajustar altura
+        self.tabs.currentChanged.connect(lambda idx: self.setFixedHeight(380 if idx == 0 else 520))
+
+        self.setLayout(layout)
+
+        # Definir altura inicial (aba Login)
+        self.setFixedHeight(350)
         
         self.setLayout(layout)
     
     def do_login(self):
-        username = self.login_username.text().strip()
+        email = self.login_email.text().strip()
         senha = self.login_senha.text()
         
-        if not username or not senha:
+        if not email or not senha:
             QMessageBox.warning(self, 'Erro', 'Preencha todos os campos!')
             return
-        
-        # Converter username para email
-        email = f"{username}@circuloatalhos.local"
         
         result = self.firebase.login(email, senha)
         if result['success']:
@@ -606,12 +693,12 @@ class LoginWindow(QWidget):
     
     def do_cadastro(self):
         nome = self.cad_nome.text().strip()
-        username = self.cad_username.text().strip()
+        email = self.cad_email_real.text().strip()
         senha = self.cad_senha.text()
         senha_confirm = self.cad_senha_confirm.text()
         setor = self.cad_setor.currentText()
         
-        if not all([nome, username, senha, senha_confirm]):
+        if not all([nome, email, senha, senha_confirm]):
             QMessageBox.warning(self, 'Erro', 'Preencha todos os campos!')
             return
         
@@ -619,18 +706,31 @@ class LoginWindow(QWidget):
             QMessageBox.warning(self, 'Erro', 'As senhas não coincidem!')
             return
         
-        # Gerar email automático: username@circuloatalhos.local
-        email = f"{username}@ctrsul.com"
+        # Gerar username a partir do email (parte antes do @)
+        username = email.split('@')[0]
         
-        result = self.firebase.signup(email, senha, nome, username, setor)
+        result = self.firebase.signup(email, senha, nome, username, setor, email)
         if result['success']:
-            QMessageBox.information(
-                self, 
-                'Cadastro Enviado',
-                'Sua conta foi criada e está aguardando aprovação do administrador.\n\n'
-                'Você receberá acesso assim que for aprovado.'
-            )
+            if result.get('first_admin'):
+                QMessageBox.information(
+                    self, 
+                    'Conta Admin Criada!',
+                    'Parabéns! Você é o primeiro usuário e foi configurado como administrador.\n\n'
+                    'Faça login para começar a usar o sistema.'
+                )
+            else:
+                QMessageBox.information(
+                    self, 
+                    'Cadastro Enviado',
+                    'Sua conta foi criada e está aguardando aprovação do administrador.\n\n'
+                    'Você receberá acesso assim que for aprovado.'
+                )
             self.tabs.setCurrentIndex(0)  # Voltar pra tab login
+            # Limpar campos
+            self.cad_nome.clear()
+            self.cad_email_real.clear()
+            self.cad_senha.clear()
+            self.cad_senha_confirm.clear()
         else:
             QMessageBox.warning(self, 'Erro', result['error'])
 
@@ -640,6 +740,34 @@ class LoginWindow(QWidget):
         self.adjustSize()
         self.updateGeometry()
         QApplication.processEvents()
+
+    def esqueci_senha(self):
+        """Enviar email de recuperação de senha"""
+        email = self.login_email.text().strip()
+        
+        if not email:
+            QMessageBox.warning(self, 'Erro', 'Digite seu email primeiro!')
+            return
+        
+        # Chamar Firebase para enviar email de reset
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={self.firebase.api_key}"
+        data = {
+            "requestType": "PASSWORD_RESET",
+            "email": email
+        }
+        
+        try:
+            response = requests.post(url, json=data)
+            if response.status_code == 200:
+                QMessageBox.information(
+                    self, 
+                    'Email Enviado',
+                    'Um email de recuperação foi enviado para seu endereço.\n\nVerifique sua caixa de entrada.'
+                )
+            else:
+                QMessageBox.warning(self, 'Erro', 'Email não encontrado!')
+        except:
+            QMessageBox.warning(self, 'Erro', 'Erro ao enviar email!')
 
 class ManageUsersWindow(QWidget):
     """Janela para admin aprovar/rejeitar usuários"""
@@ -699,7 +827,7 @@ class ManageUsersWindow(QWidget):
         self.setLayout(layout)
     
     def load_pending_users(self):
-        """Carregar lista de usuários pendentes"""
+        """Carregar lista de usuários pendentes E aprovados"""
         # Limpar lista atual
         while self.users_layout.count():
             child = self.users_layout.takeAt(0)
@@ -709,19 +837,39 @@ class ManageUsersWindow(QWidget):
         # Buscar pendentes
         pending = self.firebase.get_pending_users()
         
-        if not pending:
-            empty = QLabel('✓ Nenhum usuário pendente')
+        # Buscar aprovados (para promover a admin)
+        approved = self.firebase.get_approved_users()
+        
+        if not pending and not approved:
+            empty = QLabel('✓ Nenhum usuário para gerenciar')
             empty.setStyleSheet('color: #666; font-style: italic; padding: 40px; text-align: center;')
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.users_layout.addWidget(empty)
         else:
-            for user in pending:
-                user_card = self.create_user_card(user)
-                self.users_layout.addWidget(user_card)
+            # Seção de pendentes
+            if pending:
+                titulo_pending = QLabel('👤 Aguardando Aprovação')
+                titulo_pending.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d; padding: 10px 0;')
+                self.users_layout.addWidget(titulo_pending)
+                
+                for user in pending:
+                    user_card = self.create_pending_card(user)
+                    self.users_layout.addWidget(user_card)
+            
+            # Seção de aprovados (não-admins)
+            if approved:
+                titulo_approved = QLabel('✓ Usuários Aprovados')
+                titulo_approved.setStyleSheet('font-weight: bold; font-size: 13px; color: #2d2d2d; padding: 10px 0; margin-top: 20px;')
+                self.users_layout.addWidget(titulo_approved)
+                
+                for user in approved:
+                    if not user.get('is_admin'):  # Só mostrar não-admins
+                        user_card = self.create_approved_card(user)
+                        self.users_layout.addWidget(user_card)
         
         self.users_layout.addStretch()
     
-    def create_user_card(self, user):
+    def create_pending_card(self, user):
         """Criar card para cada usuário pendente"""
         card = QWidget()
         card.setStyleSheet("""
@@ -787,6 +935,52 @@ class ManageUsersWindow(QWidget):
         card.setLayout(layout)
         return card
     
+    def create_approved_card(self, user):
+        """Criar card para usuário aprovado (opção de promover a admin)"""
+        card = QWidget()
+        card.setStyleSheet("""
+            QWidget {
+                background-color: #f0fff0;
+                border-radius: 8px;
+                border: 2px solid #88c22b;
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        nome_label = QLabel(f"👤 {user['nome']}")
+        nome_label.setStyleSheet('font-size: 14px; font-weight: bold; color: #2d2d2d;')
+        layout.addWidget(nome_label)
+        
+        email_label = QLabel(f"✉️ {user['email']}")
+        email_label.setStyleSheet('font-size: 12px; color: #666;')
+        layout.addWidget(email_label)
+        
+        setor_label = QLabel(f"🏢 {user['setor']}")
+        setor_label.setStyleSheet('font-size: 12px; color: #666;')
+        layout.addWidget(setor_label)
+        
+        # Botão promover a admin
+        btn_promover = QPushButton('⭐ Promover a Administrador')
+        btn_promover.setStyleSheet("""
+            QPushButton {
+                background-color: #ffa500;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #ff8c00;
+            }
+        """)
+        btn_promover.clicked.connect(lambda: self.promote_to_admin(user))
+        layout.addWidget(btn_promover)
+        
+        card.setLayout(layout)
+        return card
+    
     def approve_user(self, user):
         """Aprovar usuário"""
         result = self.firebase.approve_user(
@@ -814,6 +1008,22 @@ class ManageUsersWindow(QWidget):
         if msg.clickedButton() == btn_sim:
             self.firebase.reject_user(user['uid'])
             QMessageBox.information(self, 'Rejeitado', f'Usuário {user["nome"]} foi rejeitado.')
+            self.load_pending_users()  # Recarregar lista
+
+    def promote_to_admin(self, user):
+        """Promover usuário a admin"""
+        msg = QMessageBox()
+        msg.setWindowTitle('Confirmar Promoção')
+        msg.setText(f'Promover {user["nome"]} a Administrador?\n\nAdministradores podem aprovar usuários e promover outros admins.')
+        
+        btn_sim = msg.addButton('Sim, promover', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg.addButton('Cancelar', QMessageBox.ButtonRole.NoRole)
+        
+        msg.exec()
+        
+        if msg.clickedButton() == btn_sim:
+            self.firebase.promote_to_admin(user['uid'])
+            QMessageBox.information(self, 'Promovido!', f'{user["nome"]} agora é administrador!')
             self.load_pending_users()  # Recarregar lista
 
 class KeyboardSignals(QObject):

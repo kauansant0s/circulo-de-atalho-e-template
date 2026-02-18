@@ -9,6 +9,10 @@ adicionar as condições, poder fazer assim: faz uma série de cliques, ai eu ad
 adicionar o email, caso a pessoa esqueça a senha, ai tem q ter um email de verdade, mas o login ainda é feito com o nome de usuário, só tem q colocar o email na hora de criar a conta e ele só aparece quando clicar em esqueci minha senha na tela de login, tbm trocar a mensagem qnd erra o username ou senha, na msg diz email
 quando muda para true aprovado no firebase, ele ja deveria ir automaticamente para a coleção usuarios?
 ainda n redimensiona a janela de login e cadastro
+criar a parte de senha, individuais e as do setor
+poder entrar com enter, no momento não funciona
+tirar todas as menções ao username no código e email_real tbm, afinal agr só tem o email, e tbm as partes que eram para redimensionar a altura tbm
+quando tento fazer login, ele só fecha a janela mas n entra
 
 criar um botão de confirgurações do lado de sair, onde posso:
 desabilitar as animações se o computador for lento
