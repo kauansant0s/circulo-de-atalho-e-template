@@ -9,10 +9,11 @@ adicionar as condições, poder fazer assim: faz uma série de cliques, ai eu ad
 criar a parte de senhas, individuais e as do setor
 poder entrar com enter, no momento não funciona
 tirar todas as menções ao username no código e email_real tbm, afinal agr só tem o email, e tbm as partes que eram para redimensionar a altura tbm
-mandar o código para claude limpar e arrumar o q tem q arrumar
+mandar o código para limpar e arrumar o q tem q arrumar
 
 criar um botão de confirgurações do lado de sair, onde posso:
 desabilitar as animações se o computador for lento
 alterar o modo de mover as ações (setas ou drag and drop) (o drag and drop de antes estava funcionando, eu que achei que não)
 
 redimensionar tamanho e translucidez do circulo
+
