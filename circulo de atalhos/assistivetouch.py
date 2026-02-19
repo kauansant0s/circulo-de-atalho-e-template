@@ -14,7 +14,6 @@ from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
 from pynput.mouse import Button, Controller as MouseController
 
-
 class NotificationWidget(QWidget):
     def __init__(self, message):
         super().__init__()
@@ -69,7 +68,6 @@ class NotificationWidget(QWidget):
             self.close()
         else:
             self.setWindowOpacity(self.opacity)
-
 
 class Database:
     def __init__(self, user_id=None, user_setor=None):
@@ -314,7 +312,7 @@ class FirebaseAuth:
         self.current_user = None
         self.id_token = None
         
-    def signup(self, email, password, nome, username, setor, email_real):
+    def signup(self, email, password, nome, setor):
         """Criar conta (fica pendente de aprovação)"""
         url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.api_key}"
         data = {
@@ -332,11 +330,11 @@ class FirebaseAuth:
             # Verificar se é a primeira conta (nenhum usuário aprovado existe)
             if self.is_first_user():
                 # Primeira conta: aprovar automaticamente como admin
-                self.approve_user_direct(uid, nome, username, setor, email, is_admin=True)
+                self.approve_user_direct(uid, nome, setor, email, is_admin=True)
                 return {'success': True, 'uid': uid, 'first_admin': True}
             else:
                 # Demais contas: salvar como pendente
-                self.save_pending_user(uid, nome, username, setor, email)
+                self.save_pending_user(uid, nome, setor, email)
                 return {'success': True, 'uid': uid}
         else:
             error = response.json().get('error', {}).get('message', 'Erro desconhecido')
@@ -353,8 +351,6 @@ class FirebaseAuth:
         
         try:
             response = requests.post(url, json=data)
-            print(f"DEBUG login response status: {response.status_code}")
-            print(f"DEBUG login response: {response.text}")
             
             if response.status_code == 200:
                 result = response.json()
@@ -372,23 +368,19 @@ class FirebaseAuth:
             else:
                 error_data = response.json()
                 error_msg = error_data.get('error', {}).get('message', 'Erro desconhecido')
-                print(f"DEBUG erro: {error_msg}")
                 return {'success': False, 'error': 'Email ou senha incorretos'}
         except Exception as e:
-            print(f"DEBUG exception: {e}")
             return {'success': False, 'error': f'Erro de conexão: {str(e)}'}
     
-    def save_pending_user(self, uid, nome, username, setor, email, email_real):
+    def save_pending_user(self, uid, nome, setor, email):
         """Salvar usuário pendente no Firestore"""
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/pending_users/{uid}"
         headers = {"Authorization": f"Bearer {self.id_token}"}
         data = {
             "fields": {
                 "nome": {"stringValue": nome},
-                "username": {"stringValue": username},
                 "setor": {"stringValue": setor},
                 "email": {"stringValue": email},
-                "email_real": {"stringValue": email_real},
                 "aprovado": {"booleanValue": False}
             }
         }
@@ -405,7 +397,6 @@ class FirebaseAuth:
             fields = data.get('fields', {})
             return {
                 'nome': fields.get('nome', {}).get('stringValue', ''),
-                'username': fields.get('username', {}).get('stringValue', ''),
                 'setor': fields.get('setor', {}).get('stringValue', ''),
                 'aprovado': fields.get('aprovado', {}).get('booleanValue', False),
                 'is_admin': fields.get('is_admin', {}).get('booleanValue', False)
@@ -431,14 +422,13 @@ class FirebaseAuth:
         except:
             return True
 
-    def approve_user_direct(self, uid, nome, username, setor, email, is_admin=False):
+    def approve_user_direct(self, uid, nome, setor, email, is_admin=False):
         """Aprovar usuário direto (para primeira conta)"""
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios/{uid}"
         headers = {"Authorization": f"Bearer {self.id_token}"}
         data = {
             "fields": {
                 "nome": {"stringValue": nome},
-                "username": {"stringValue": username},
                 "setor": {"stringValue": setor},
                 "email": {"stringValue": email},
                 "aprovado": {"booleanValue": True},
@@ -462,14 +452,13 @@ class FirebaseAuth:
                 users.append({
                     'uid': uid,
                     'nome': fields.get('nome', {}).get('stringValue', ''),
-                    'username': fields.get('username', {}).get('stringValue', ''),
                     'setor': fields.get('setor', {}).get('stringValue', ''),
                     'email': fields.get('email', {}).get('stringValue', '')
                 })
             return users
         return []
     
-    def approve_user(self, uid, nome, username, setor, email):
+    def approve_user(self, uid, nome, setor, email):
         """Aprovar usuário - move de pending para usuarios"""
         # 1. Criar documento em usuarios/
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/usuarios/{uid}"
@@ -477,7 +466,6 @@ class FirebaseAuth:
         data = {
             "fields": {
                 "nome": {"stringValue": nome},
-                "username": {"stringValue": username},
                 "setor": {"stringValue": setor},
                 "email": {"stringValue": email},
                 "aprovado": {"booleanValue": True},
@@ -544,10 +532,12 @@ class LoginWindow(QWidget):
     """Tela de login/cadastro"""
     login_success = pyqtSignal(dict)
     
-    def __init__(self, firebase_auth):
+    def __init__(self, firebase_auth, db):
         super().__init__()
         self.firebase = firebase_auth
+        self.db = db
         self.init_ui()
+        self.check_saved_login()
     
     def init_ui(self):
         self.setWindowTitle('AssistiveTouch - Login')
@@ -581,12 +571,14 @@ class LoginWindow(QWidget):
         login_layout.addWidget(QLabel('Email:'))
         self.login_email = QLineEdit()
         self.login_email.setPlaceholderText('seu@email.com')
+        self.login_email.returnPressed.connect(self.do_login)  # Enter para logar
         login_layout.addWidget(self.login_email)
         
         login_layout.addWidget(QLabel('Senha:'))
         self.login_senha = QLineEdit()
         self.login_senha.setEchoMode(QLineEdit.EchoMode.Password)
         self.login_senha.setPlaceholderText('••••••••')
+        self.login_senha.returnPressed.connect(self.do_login)  # Enter para logar
         login_layout.addWidget(self.login_senha)
         
         btn_login = QPushButton('Entrar')
@@ -603,6 +595,7 @@ class LoginWindow(QWidget):
             }
         """)
         btn_login.clicked.connect(self.do_login)
+        btn_login.setDefault(True)  # Enter ativa este botão
         login_layout.addWidget(btn_login)
 
         esqueci_senha = QLabel('<a href="#" style="color: #406e54;">Esqueci minha senha</a>')
@@ -661,8 +654,6 @@ class LoginWindow(QWidget):
         
         self.tabs.addTab(login_tab, 'Login')
         self.tabs.addTab(cadastro_tab, 'Cadastro')
-
-        self.tabs.currentChanged.connect(self.adjust_size)
         
         layout.addWidget(self.tabs)
 
@@ -686,6 +677,10 @@ class LoginWindow(QWidget):
         
         result = self.firebase.login(email, senha)
         if result['success']:
+            # Salvar credenciais para auto-login
+            self.db.set_config('saved_email', email)
+            self.db.set_config('saved_password', senha)  # Em produção, use criptografia!
+            
             self.login_success.emit(result['user'])
             self.close()
         else:
@@ -706,10 +701,7 @@ class LoginWindow(QWidget):
             QMessageBox.warning(self, 'Erro', 'As senhas não coincidem!')
             return
         
-        # Gerar username a partir do email (parte antes do @)
-        username = email.split('@')[0]
-        
-        result = self.firebase.signup(email, senha, nome, username, setor, email)
+        result = self.firebase.signup(email, senha, nome, setor)
         if result['success']:
             if result.get('first_admin'):
                 QMessageBox.information(
@@ -733,13 +725,6 @@ class LoginWindow(QWidget):
             self.cad_senha_confirm.clear()
         else:
             QMessageBox.warning(self, 'Erro', result['error'])
-
-    def adjust_size(self):
-        """Ajustar tamanho da janela ao trocar de aba"""
-        # Forçar recalcular tamanho
-        self.adjustSize()
-        self.updateGeometry()
-        QApplication.processEvents()
 
     def esqueci_senha(self):
         """Enviar email de recuperação de senha"""
@@ -768,6 +753,20 @@ class LoginWindow(QWidget):
                 QMessageBox.warning(self, 'Erro', 'Email não encontrado!')
         except:
             QMessageBox.warning(self, 'Erro', 'Erro ao enviar email!')
+    
+    def check_saved_login(self):
+        """Verificar se há login salvo e tentar fazer login automático"""
+        saved_email = self.db.get_config('saved_email')
+        saved_password = self.db.get_config('saved_password')
+        
+        if saved_email and saved_password:
+            # Tentar login automático
+            result = self.firebase.login(saved_email, saved_password)
+            if result['success']:
+                # Login automático bem-sucedido
+                self.login_success.emit(result['user'])
+                self.close()
+            # Se falhar, apenas mostra tela de login normalmente
 
 class ManageUsersWindow(QWidget):
     """Janela para admin aprovar/rejeitar usuários"""
@@ -883,14 +882,14 @@ class ManageUsersWindow(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
         
-        # Nome e username
+        # Nome
         nome_label = QLabel(f"👤 {user['nome']}")
         nome_label.setStyleSheet('font-size: 14px; font-weight: bold; color: #2d2d2d;')
         layout.addWidget(nome_label)
         
-        username_label = QLabel(f"@{user['username']}")
-        username_label.setStyleSheet('font-size: 12px; color: #666;')
-        layout.addWidget(username_label)
+        email_label = QLabel(f"✉️ {user['email']}")
+        email_label.setStyleSheet('font-size: 12px; color: #666;')
+        layout.addWidget(email_label)
         
         setor_label = QLabel(f"🏢 {user['setor']}")
         setor_label.setStyleSheet('font-size: 12px; color: #666;')
@@ -986,7 +985,6 @@ class ManageUsersWindow(QWidget):
         result = self.firebase.approve_user(
             user['uid'], 
             user['nome'], 
-            user['username'], 
             user['setor'],
             user['email']
         )
@@ -1134,7 +1132,6 @@ class KeyboardListener:
             print(f"Erro no release: {e}")
     
     def _show_popup_slot(self, x, y):
-        print("=== INICIANDO BUSCA (via signal) ===")
         self.search_mode = True
         self.search_query = ""
         
@@ -1308,8 +1305,6 @@ class KeyboardListener:
                     return
             else:
                 print(f"    -> Tecla muito curta ({len(tecla)} chars), é Alt+Tecla")
-        
-        print("=== Nenhum match encontrado ===")
     
     def check_alt_shortcuts(self, char):
         print(f"Verificando Alt+{char}")
@@ -1398,7 +1393,6 @@ class KeyboardListener:
         thread.daemon = True
         thread.start()
 
-
 class TemplatesPopup(QWidget):
     def __init__(self, db, listener):
         super().__init__()
@@ -1409,7 +1403,6 @@ class TemplatesPopup(QWidget):
         self.init_ui()
     
     def init_ui(self):
-        print(">> Criando popup")
         
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
@@ -1495,8 +1488,6 @@ class TemplatesPopup(QWidget):
         
         # Carregar todos os templates inicialmente
         self.update_search("")
-        
-        print(">> Popup criado")
     
     def update_search(self, query):
         self.list_widget.clear()
@@ -1557,18 +1548,12 @@ class TemplatesPopup(QWidget):
             # Agendar inserção do texto
             QTimer.singleShot(50, lambda: self.listener.signals.insert_text.emit(texto, chars_to_delete))
 
-
 class FloatingCircle(QWidget):
     def __init__(self, db, firebase, user_data):
         super().__init__()
         self.db = db
         self.firebase = firebase
         self.user_data = user_data
-        
-        print("DEBUG FloatingCircle: __init__ chamado")
-        print(f"DEBUG: db = {db}")
-        print(f"DEBUG: firebase = {firebase}")
-        print(f"DEBUG: user_data = {user_data}")
         
         self.dragging = False
         self.dragging = False
@@ -1581,7 +1566,6 @@ class FloatingCircle(QWidget):
         # self._scale = 0.85  # Iniciar 15% menor (85%)
         # self._opacity_value = 0.6  # Iniciar com 60% opacidade
 
-        # Propriedades para animação (TESTE: começar 100% visível)
         self._scale = 1.0  # Tamanho normal
         self._opacity_value = 1.0  # 100% visível
         
@@ -1616,7 +1600,6 @@ class FloatingCircle(QWidget):
         self.setWindowOpacity(value)
     
     def init_ui(self):
-        print("DEBUG FloatingCircle: init_ui chamado")
 
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -1630,12 +1613,10 @@ class FloatingCircle(QWidget):
         # Opacidade inicial: 60%
         # self.setWindowOpacity(0.6)
 
-        # Opacidade inicial: 100% (TESTE)
         self.setWindowOpacity(1.0)
         
         # SEMPRE iniciar no canto superior direito (ignorar posição salva)
         screen = QApplication.primaryScreen().geometry()
-        print(f"DEBUG: Resolução da tela: {screen.width()}x{screen.height()}")
 
         # Forçar posição visível e segura
         x = screen.width() - 120  # Mais espaço da borda
@@ -1647,12 +1628,6 @@ class FloatingCircle(QWidget):
         self.activateWindow()
         self.setFocus()
 
-        print("DEBUG FloatingCircle: Janela configurada")
-        print(f"DEBUG: Posição: ({x}, {y})")
-        print(f"DEBUG: Tamanho: {self.size()}")
-        print(f"DEBUG: Flags: {self.windowFlags()}")
-
-    
     def paintEvent(self, event):
         """Desenhar o círculo com anéis concêntricos"""
         painter = QPainter(self)
@@ -1730,10 +1705,6 @@ class FloatingCircle(QWidget):
             event.accept()
     
     def show_menu(self):
-        print(f"Círculo: show_menu chamado. Menu existe? {self.menu is not None}")
-        if self.menu:
-            print(f"Círculo: Menu está visível? {self.menu.isVisible()}")
-        
         # Se o menu já está aberto, fechar com animação reversa
         if self.menu and self.menu.isVisible():
             print("Círculo: Menu já está aberto, fechando com animação...")
@@ -1884,7 +1855,6 @@ class FloatingCircle(QWidget):
             self.opacity_animation.setEndValue(0.6)
             self.opacity_animation.start()
 
-
 class MainMenu(QWidget):
     _last_tab = 'templates'  # Variável de classe para lembrar última aba
     
@@ -1937,133 +1907,93 @@ class MainMenu(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | 
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Popup  # Popup fecha automaticamente ao clicar fora
+            Qt.WindowType.Popup
         )
         
-        self.setFixedWidth(350)
+        self.setFixedSize(350, 400)
         
+        # Layout principal vazio
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        tabs_container = QWidget()
-        tabs_layout = QHBoxLayout()
-        tabs_layout.setContentsMargins(0, 0, 0, 0)
-        tabs_layout.setSpacing(2)
-        
-        self.btn_templates = QPushButton('Templates')
-        self.btn_atalhos = QPushButton('Atalhos')
-        self.btn_config = QPushButton('⚙️')  # Botão de config
-
-        self.btn_templates.clicked.connect(self.show_templates_tab)
-        self.btn_atalhos.clicked.connect(self.show_atalhos_tab)
-        self.btn_config.clicked.connect(self.show_config_tab)
-
-        # Estilo do botão config (menor, ícone)
-        self.btn_config.setFixedWidth(50)
-
-        tabs_layout.addWidget(self.btn_templates)
-        tabs_layout.addWidget(self.btn_atalhos)
-        tabs_layout.addWidget(self.btn_config)
-        
-        # Espaçamento menor antes do botão sair
-        tabs_layout.addSpacing(20)
-        
-        # Botão sair no canto direito
-        btn_sair = QPushButton('Sair')
-        btn_sair.setFixedWidth(60)
-        btn_sair.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #82414c;
-                border: none;
-                padding: 12px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(130, 65, 76, 0.15);
-                color: #82414c;
-            }
-        """)
-        btn_sair.clicked.connect(self.sair_programa)
-        tabs_layout.addWidget(btn_sair)
-        
-        tabs_container.setLayout(tabs_layout)
-        
-        main_layout.addWidget(tabs_container)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background-color: #f5f0ed; }")
-        
-        self.content_widget = QWidget()
-        self.content_layout = QVBoxLayout()
-        self.content_layout.setContentsMargins(10, 10, 10, 10)
-        self.content_layout.setSpacing(5)
-        self.content_widget.setLayout(self.content_layout)
-        
-        scroll.setWidget(self.content_widget)
-        main_layout.addWidget(scroll)
-        
         self.setLayout(main_layout)
         
+        # Estilo: retângulo cor #DEDDD2 com bordas arredondadas
         self.setStyleSheet("""
             QWidget {
-                background-color: #f5f0ed;
+                background-color: #DEDDD2;
                 border-radius: 10px;
-            }
-            QPushButton {
-                background-color: #c8bfb8;
-                color: #3d3d3d;
-                border: none;
-                padding: 12px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #b8ada6;
             }
         """)
         
-        self.setFixedHeight(400)
-        
-        # Abrir na última aba usada (do banco ou variável de classe)
+        # Abrir na última aba usada
         last_tab = self.db.get_config('last_tab', MainMenu._last_tab)
         if last_tab == 'atalhos':
             self.show_atalhos_tab()
         else:
             self.show_templates_tab()
     
+    def on_floating_add_click(self):
+        """Ação do botão flutuante - adiciona template ou atalho conforme aba ativa"""
+        if MainMenu._last_tab == 'templates':
+            self.add_template()
+        elif MainMenu._last_tab == 'atalhos':
+            self.add_shortcut()
+    
     def show_templates_tab(self):
         MainMenu._last_tab = 'templates'
         self.db.set_config('last_tab', 'templates')
+        
+        # Atualizar cor das tabs principais
+        self.btn_templates.setStyleSheet("""
+            QPushButton {
+                background-color: #a67b7b;
+                color: white;
+                border: none;
+                padding: 15px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
+        self.btn_atalhos.setStyleSheet("""
+            QPushButton {
+                background-color: #d4c4c4;
+                color: #666;
+                border: none;
+                padding: 15px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #c4b4b4;
+            }
+        """)
+        
         while self.content_layout.count():
             child = self.content_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
 
-                # Sub-abas: Meus Templates / Templates do Setor
-                sub_tabs = QWidget()
-                sub_layout = QHBoxLayout()
-                sub_layout.setContentsMargins(0, 0, 0, 0)
-                sub_layout.setSpacing(5)
-                
-                self.btn_meus_templates = QPushButton('Meus Templates')
-                self.btn_setor_templates = QPushButton('Templates do Setor')
-                
-                self.btn_meus_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=True))
-                self.btn_setor_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=False))
-                
-                sub_layout.addWidget(self.btn_meus_templates)
-                sub_layout.addWidget(self.btn_setor_templates)
-                sub_tabs.setLayout(sub_layout)
-                
-                self.content_layout.addWidget(sub_tabs)
-                
-                # Mostrar templates do setor por padrão
-                self.show_templates_list(apenas_meus=False)
+        # Sub-abas: Meus Templates / Templates do Setor
+        sub_tabs = QWidget()
+        sub_layout = QHBoxLayout()
+        sub_layout.setContentsMargins(10, 8, 10, 5)  # Pequeno padding
+        sub_layout.setSpacing(15)  # Espaço entre os botões
+        
+        self.btn_meus_templates = QPushButton('Meus Templates')
+        self.btn_setor_templates = QPushButton('Templates do Setor')
+        
+        self.btn_meus_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=True))
+        self.btn_setor_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=False))
+        
+        sub_layout.addWidget(self.btn_meus_templates)
+        sub_layout.addWidget(self.btn_setor_templates)
+        sub_tabs.setLayout(sub_layout)
+        
+        self.content_layout.addWidget(sub_tabs)
+        
+        # Mostrar templates do setor por padrão
+        self.show_templates_list(apenas_meus=False)
 
     def show_templates_list(self, apenas_meus=False):
         """Mostrar lista de templates (meus ou do setor)"""
@@ -2073,45 +2003,57 @@ class MainMenu(QWidget):
             if child.widget():
                 child.widget().deleteLater()
         
-        # Atualizar estilo dos botões
+        # Atualizar estilo dos botões - underline em vez de fundo
         if apenas_meus:
             self.btn_meus_templates.setStyleSheet("""
                 QPushButton {
-                    background-color: #406e54;
-                    color: white;
+                    background-color: transparent;
+                    color: #2d2d2d;
                     border: none;
+                    border-bottom: 3px solid #2d2d2d;
                     padding: 8px 12px;
-                    font-size: 11px;
-                    font-weight: bold;
+                    font-size: 13px;
+                    font-weight: normal;
                 }
             """)
             self.btn_setor_templates.setStyleSheet("""
                 QPushButton {
-                    background-color: #e0e0e0;
-                    color: #666;
+                    background-color: transparent;
+                    color: #999;
                     border: none;
+                    border-bottom: 3px solid transparent;
                     padding: 8px 12px;
-                    font-size: 11px;
+                    font-size: 13px;
+                    font-weight: normal;
+                }
+                QPushButton:hover {
+                    color: #666;
                 }
             """)
         else:
             self.btn_meus_templates.setStyleSheet("""
                 QPushButton {
-                    background-color: #e0e0e0;
-                    color: #666;
+                    background-color: transparent;
+                    color: #999;
                     border: none;
+                    border-bottom: 3px solid transparent;
                     padding: 8px 12px;
-                    font-size: 11px;
+                    font-size: 13px;
+                    font-weight: normal;
+                }
+                QPushButton:hover {
+                    color: #666;
                 }
             """)
             self.btn_setor_templates.setStyleSheet("""
                 QPushButton {
-                    background-color: #406e54;
-                    color: white;
+                    background-color: transparent;
+                    color: #2d2d2d;
                     border: none;
+                    border-bottom: 3px solid #2d2d2d;
                     padding: 8px 12px;
-                    font-size: 11px;
-                    font-weight: bold;
+                    font-size: 13px;
+                    font-weight: normal;
                 }
             """)
         
@@ -2159,24 +2101,6 @@ class MainMenu(QWidget):
         
         self.current_templates_list.setLayout(templates_layout)
         self.content_layout.addWidget(self.current_templates_list)
-        
-        # Botão adicionar
-        btn_add = QPushButton('+ Novo Template')
-        btn_add.setStyleSheet("""
-            QPushButton {
-                background-color: #88c22b;
-                color: white;
-                border: none;
-                padding: 12px;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #76a824;
-            }
-        """)
-        btn_add.clicked.connect(self.add_template)
-        self.content_layout.addWidget(btn_add)
 
     def filter_templates(self, query, apenas_meus):
         """Filtrar templates conforme busca"""
@@ -2298,31 +2222,56 @@ class MainMenu(QWidget):
     def show_atalhos_tab(self):
         MainMenu._last_tab = 'atalhos'
         self.db.set_config('last_tab', 'atalhos')
+        
+        # Atualizar cor das tabs principais
+        self.btn_atalhos.setStyleSheet("""
+            QPushButton {
+                background-color: #a67b7b;
+                color: white;
+                border: none;
+                padding: 15px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
+        self.btn_templates.setStyleSheet("""
+            QPushButton {
+                background-color: #d4c4c4;
+                color: #666;
+                border: none;
+                padding: 15px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #c4b4b4;
+            }
+        """)
+        
         while self.content_layout.count():
             child = self.content_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
 
-                # Sub-abas: Meus Atalhos / Atalhos do Setor
-                sub_tabs = QWidget()
-                sub_layout = QHBoxLayout()
-                sub_layout.setContentsMargins(0, 0, 0, 0)
-                sub_layout.setSpacing(5)
-                
-                self.btn_meus_atalhos = QPushButton('Meus Atalhos')
-                self.btn_setor_atalhos = QPushButton('Atalhos do Setor')
-                
-                self.btn_meus_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=True))
-                self.btn_setor_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=False))
-                
-                sub_layout.addWidget(self.btn_meus_atalhos)
-                sub_layout.addWidget(self.btn_setor_atalhos)
-                sub_tabs.setLayout(sub_layout)
-                
-                self.content_layout.addWidget(sub_tabs)
-                
-                # Mostrar atalhos do setor por padrão
-                self.show_atalhos_list(apenas_meus=False)
+        # Sub-abas: Meus Atalhos / Atalhos do Setor
+        sub_tabs = QWidget()
+        sub_layout = QHBoxLayout()
+        sub_layout.setContentsMargins(10, 8, 10, 5)  # Pequeno padding
+        sub_layout.setSpacing(15)  # Espaço entre os botões
+        
+        self.btn_meus_atalhos = QPushButton('Meus Atalhos')
+        self.btn_setor_atalhos = QPushButton('Atalhos do Setor')
+        
+        self.btn_meus_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=True))
+        self.btn_setor_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=False))
+        
+        sub_layout.addWidget(self.btn_meus_atalhos)
+        sub_layout.addWidget(self.btn_setor_atalhos)
+        sub_tabs.setLayout(sub_layout)
+        
+        self.content_layout.addWidget(sub_tabs)
+        
+        # Mostrar atalhos do setor por padrão
+        self.show_atalhos_list(apenas_meus=False)
     
     def show_atalhos_list(self, apenas_meus=False):
         """Mostrar lista de atalhos (meus ou do setor)"""
@@ -2332,45 +2281,57 @@ class MainMenu(QWidget):
             if child.widget():
                 child.widget().deleteLater()
         
-        # Atualizar estilo dos botões
+        # Atualizar estilo dos botões - underline
         if apenas_meus:
             self.btn_meus_atalhos.setStyleSheet("""
                 QPushButton {
-                    background-color: #406e54;
-                    color: white;
+                    background-color: transparent;
+                    color: #2d2d2d;
                     border: none;
+                    border-bottom: 3px solid #2d2d2d;
                     padding: 8px 12px;
-                    font-size: 11px;
-                    font-weight: bold;
+                    font-size: 13px;
+                    font-weight: normal;
                 }
             """)
             self.btn_setor_atalhos.setStyleSheet("""
                 QPushButton {
-                    background-color: #e0e0e0;
-                    color: #666;
+                    background-color: transparent;
+                    color: #999;
                     border: none;
+                    border-bottom: 3px solid transparent;
                     padding: 8px 12px;
-                    font-size: 11px;
+                    font-size: 13px;
+                    font-weight: normal;
+                }
+                QPushButton:hover {
+                    color: #666;
                 }
             """)
         else:
             self.btn_meus_atalhos.setStyleSheet("""
                 QPushButton {
-                    background-color: #e0e0e0;
-                    color: #666;
+                    background-color: transparent;
+                    color: #999;
                     border: none;
+                    border-bottom: 3px solid transparent;
                     padding: 8px 12px;
-                    font-size: 11px;
+                    font-size: 13px;
+                    font-weight: normal;
+                }
+                QPushButton:hover {
+                    color: #666;
                 }
             """)
             self.btn_setor_atalhos.setStyleSheet("""
                 QPushButton {
-                    background-color: #406e54;
-                    color: white;
+                    background-color: transparent;
+                    color: #2d2d2d;
                     border: none;
+                    border-bottom: 3px solid #2d2d2d;
                     padding: 8px 12px;
-                    font-size: 11px;
-                    font-weight: bold;
+                    font-size: 13px;
+                    font-weight: normal;
                 }
             """)
         
@@ -2387,24 +2348,6 @@ class MainMenu(QWidget):
                 # Card do atalho (copie o código que já existia)
                 # Vou te dar no próximo passo
                 pass
-        
-        # Botão adicionar
-        btn_add = QPushButton('+ Novo Atalho')
-        btn_add.setStyleSheet("""
-            QPushButton {
-                background-color: #88c22b;
-                color: white;
-                border: none;
-                padding: 12px;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #76a824;
-            }
-        """)
-        btn_add.clicked.connect(self.add_shortcut)
-        self.content_layout.addWidget(btn_add)
 
     def show_config_tab(self):
         """Mostrar aba de configurações"""
@@ -2559,6 +2502,10 @@ class MainMenu(QWidget):
             # Deslogar do Firebase
             self.firebase.logout()
             
+            # Limpar credenciais salvas
+            self.db.set_config('saved_email', '')
+            self.db.set_config('saved_password', '')
+            
             # Fechar tudo e voltar pro login
             self.close()
             if self.circle_parent:
@@ -2629,7 +2576,6 @@ class MainMenu(QWidget):
             self.show_atalhos_tab()
     
     def add_shortcut(self):
-        print("MainMenu: Abrindo janela de adicionar atalho")
         if self.add_window and self.add_window.isVisible():
             self.add_window.close()
         
@@ -2639,7 +2585,6 @@ class MainMenu(QWidget):
         self.add_window.activateWindow()
     
     def edit_shortcut(self, shortcut):
-        print(f"MainMenu: Editando atalho {shortcut['id']}")
         if self.add_window and self.add_window.isVisible():
             self.add_window.close()
         
@@ -2696,17 +2641,13 @@ class MainMenu(QWidget):
         self.show_atalhos_tab()
     
     def add_template(self):
-        print("MainMenu: Abrindo janela de adicionar template")
         try:
             # Fechar janela anterior se existir
             if self.add_window and self.add_window.isVisible():
-                print("MainMenu: Fechando janela anterior")
                 self.add_window.close()
             
             # Criar nova janela
             self.add_window = AddTemplateWindow(self.db, menu_ref=self)
-            print(f"MainMenu: Janela criada: {self.add_window}")
-            print(f"MainMenu: Parent da janela: {self.add_window.parent()}")
             
             # Importante: NÃO fechar o menu
             # self.close()  <- REMOVIDO
@@ -2714,9 +2655,7 @@ class MainMenu(QWidget):
             self.add_window.show()
             self.add_window.raise_()
             self.add_window.activateWindow()
-            print("MainMenu: Janela mostrada com sucesso")
         except Exception as e:
-            print(f"MainMenu: ERRO ao criar janela: {e}")
             import traceback
             traceback.print_exc()
     
@@ -2760,9 +2699,7 @@ class MainMenu(QWidget):
         pass
     
     def closeEvent(self, event):
-        print("MainMenu: closeEvent")
         event.accept()
-
 
 class EditableActionsList(QWidget):
     """Widget de lista de ações com edição, exclusão e reordenação por drag-and-drop"""
@@ -2949,7 +2886,6 @@ class EditableActionsList(QWidget):
         
         # Usar accepted/rejected em vez de exec()
         def on_accepted():
-            print(f"DEBUG salvando: spin_x={spin_x.value()}, spin_y={spin_y.value()}")
             if radio_direito.isChecked():
                 self.acoes[index]['type'] = 'right_click'
                 if 'vezes' in self.acoes[index]:
@@ -2959,7 +2895,6 @@ class EditableActionsList(QWidget):
                 self.acoes[index]['vezes'] = spin_vezes.value()
             self.acoes[index]['x'] = spin_x.value()
             self.acoes[index]['y'] = spin_y.value()
-            print(f"DEBUG acao salva: {self.acoes[index]}")
             self.refresh_list()
         
         buttons.accepted.connect(on_accepted)
@@ -3170,10 +3105,8 @@ class EditableActionsList(QWidget):
     
     def on_recapture_position(self, dialog, spin_x, spin_y, x, y):
         """Callback após recapturar posição"""
-        print(f"DEBUG on_recapture_position: x={x}, y={y}")
         spin_x.setValue(int(x))
         spin_y.setValue(int(y))
-        print(f"DEBUG spin depois: {spin_x.value()}, {spin_y.value()}")
         
         dialog.show()
         dialog.raise_()
@@ -3297,7 +3230,6 @@ class EditableActionsList(QWidget):
         self.drag_from_index = -1
         self.drag_hover_index = -1
         self.restore_visual_order()
-
 
 class ActionItemWidget(QWidget):
     """Widget individual para cada ação na lista"""
@@ -3675,10 +3607,8 @@ class ActionItemWidget(QWidget):
                 self.ms_input.setText(str(self.parent_list.acoes[self.index]['ms']))
                 self.ms_input.setReadOnly(True)
 
-
 class AddShortcutWindow(QWidget):
     def __init__(self, db, menu_ref=None, shortcut_data=None):
-        print("AddShortcutWindow: __init__ chamado")
         super().__init__(None)
         
         self.db = db
@@ -3960,7 +3890,6 @@ class AddShortcutWindow(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.acoes_list.add_acao({'type': 'sleep', 'ms': spinbox.value()})
     
-    
     def salvar(self):
         nome = self.nome_input.text().strip()
         tecla_input = self.atalho_input.text().strip()
@@ -4050,10 +3979,8 @@ class AddShortcutWindow(QWidget):
         self.close()
     
     def closeEvent(self, event):
-        print("AddShortcutWindow: closeEvent chamado")
         self.menu_reference = None
         event.accept()
-
 
 class ClickCaptureOverlay(QWidget):
     coordinate_captured = pyqtSignal(int, int)
@@ -4091,7 +4018,6 @@ class ClickCaptureOverlay(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.close()
-
 
 class DragCaptureOverlay(QWidget):
     drag_captured = pyqtSignal(int, int, int, int)
@@ -4165,10 +4091,8 @@ class DragCaptureOverlay(QWidget):
         if event.key() == Qt.Key.Key_Escape:
             self.close()
 
-
 class AddTemplateWindow(QWidget):
     def __init__(self, db, menu_ref=None):
-        print("AddTemplateWindow: __init__ chamado")
         super().__init__(None)  # Explicitamente sem parent
         print(f"AddTemplateWindow: super().__init__ concluído, parent={self.parent()}")
         
@@ -4178,21 +4102,13 @@ class AddTemplateWindow(QWidget):
         # Janela completamente independente
         self.setWindowFlags(Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-        
-        print("AddTemplateWindow: Flags configuradas, chamando init_ui")
         self.init_ui()
-        print("AddTemplateWindow: init_ui concluído")
     
     def closeEvent(self, event):
-        print("AddTemplateWindow: closeEvent chamado")
         # Limpar referências
         self.menu_reference = None
         # Apenas aceitar
         event.accept()
-        print("AddTemplateWindow: fechado com sucesso")
-    
-    def __del__(self):
-        print("AddTemplateWindow: __del__ chamado (objeto sendo destruído)")
     
     def init_ui(self):
         self.setWindowTitle('Novo Template')
@@ -4271,7 +4187,6 @@ class AddTemplateWindow(QWidget):
         
         # Fechar janela por último
         self.close()
-
 
 class EditTemplateWindow(QWidget):
     """Janela para editar template existente"""
@@ -4377,6 +4292,9 @@ class EditTemplateWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     
+    # Criar database temporário para auto-login (sem user_id ainda)
+    temp_db = Database()
+    
     # Criar instância de autenticação
     firebase = FirebaseAuth()
     
@@ -4384,13 +4302,12 @@ def main():
     global circle
     circle = None
     
-    # Mostrar tela de login
-    login_window = LoginWindow(firebase)
+    # Mostrar tela de login (com db para salvar credenciais)
+    login_window = LoginWindow(firebase, temp_db)
     
     # Quando login for bem-sucedido, criar o círculo
     def on_login_success(user_data):
         global circle
-        print(f"DEBUG: Login success! User: {user_data}")
         
         # Criar database com dados do usuário
         db = Database(user_id=user_data['uid'], user_setor=user_data['setor'])
@@ -4398,13 +4315,13 @@ def main():
         # Criar círculo com usuário logado
         circle = FloatingCircle(db, firebase, user_data)
         circle.show()
-        circle.raise_()  # Trazer para frente
-        circle.activateWindow()  # Ativar
+        circle.raise_()
+        circle.activateWindow()
         circle.setWindowState(circle.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
-
-        print("DEBUG: Círculo criado e mostrado")
-        print(f"DEBUG: isVisible = {circle.isVisible()}")
-        print(f"DEBUG: isActiveWindow = {circle.isActiveWindow()}")
+        
+        # Iniciar listener de teclado
+        listener = KeyboardListener(db)
+        listener.start()
     
     login_window.login_success.connect(on_login_success)
     login_window.show()
