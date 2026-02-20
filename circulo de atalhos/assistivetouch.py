@@ -8,8 +8,9 @@ from firebase_config import FIREBASE_CONFIG, SETORES
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
                               QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox, QTabWidget)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty
-from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty, QByteArray
+from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient, QFont, QPixmap, QIcon
+from PyQt6.QtSvg import QSvgRenderer
 from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
 from pynput.mouse import Button, Controller as MouseController
@@ -536,8 +537,9 @@ class LoginWindow(QWidget):
         super().__init__()
         self.firebase = firebase_auth
         self.db = db
+        self.auto_login_successful = False
         self.init_ui()
-        self.check_saved_login()
+        # self.check_saved_login()  # DESABILITADO TEMPORARIAMENTE
     
     def init_ui(self):
         self.setWindowTitle('AssistiveTouch - Login')
@@ -759,14 +761,24 @@ class LoginWindow(QWidget):
         saved_email = self.db.get_config('saved_email')
         saved_password = self.db.get_config('saved_password')
         
+        print(f"Auto-login: email={saved_email}, senha={'***' if saved_password else 'None'}")
+        
         if saved_email and saved_password:
             # Tentar login automático
             result = self.firebase.login(saved_email, saved_password)
+            print(f"Auto-login result: {result.get('success')}")
             if result['success']:
                 # Login automático bem-sucedido
+                print("Auto-login bem-sucedido!")
+                self.auto_login_successful = True
                 self.login_success.emit(result['user'])
-                self.close()
+                # Não chamar close() - apenas marcar como sucesso
+            else:
+                print(f"Auto-login falhou: {result.get('error')}")
+                self.show()  # Mostrar janela se auto-login falhar
             # Se falhar, apenas mostra tela de login normalmente
+        else:
+            self.show()  # Mostrar janela se não tiver credenciais salvas
 
 class ManageUsersWindow(QWidget):
     """Janela para admin aprovar/rejeitar usuários"""
@@ -1855,8 +1867,21 @@ class FloatingCircle(QWidget):
             self.opacity_animation.setEndValue(0.6)
             self.opacity_animation.start()
 
+def create_svg_icon(svg_code, size=20):
+    """Cria um QIcon a partir de código SVG"""
+    svg_bytes = QByteArray(svg_code.encode())
+    renderer = QSvgRenderer(svg_bytes)
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
+
 class MainMenu(QWidget):
     _last_tab = 'templates'  # Variável de classe para lembrar última aba
+    _last_sub_tab_templates = 'meus'  # Última sub-aba de templates
+    _last_sub_tab_atalhos = 'meus'  # Última sub-aba de atalhos
     
     def __init__(self, db, parent=None, firebase=None, user_data=None):
         super().__init__(parent)
@@ -1909,23 +1934,121 @@ class MainMenu(QWidget):
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Popup
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         self.setFixedSize(350, 400)
         
-        # Layout principal vazio
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
-        self.setLayout(main_layout)
-        
-        # Estilo: retângulo cor #DEDDD2 com bordas arredondadas
-        self.setStyleSheet("""
+        # Container com bordas arredondadas
+        container = QWidget()
+        container.setStyleSheet("""
             QWidget {
                 background-color: #DEDDD2;
                 border-radius: 10px;
             }
         """)
+        
+        # Layout do container
+        container_layout = QVBoxLayout()
+        container_layout.setContentsMargins(15, 15, 15, 15)
+        container_layout.setSpacing(10)
+        
+        # Botões Templates e Atalhos no topo
+        tabs_layout = QHBoxLayout()
+        tabs_layout.setSpacing(10)
+        
+        self.btn_templates = QPushButton('Templates')
+        self.btn_atalhos = QPushButton('Atalhos')
+        
+        # Fonte Instrument Sans
+        font = QFont("Instrument Sans", 14)
+        self.btn_templates.setFont(font)
+        self.btn_atalhos.setFont(font)
+        
+        # Conectar cliques
+        self.btn_templates.clicked.connect(self.show_templates_tab)
+        self.btn_atalhos.clicked.connect(self.show_atalhos_tab)
+        
+        # Aplicar estilo inicial (Templates selecionado)
+        self.update_tab_styles(selected='templates')
+        
+        tabs_layout.addWidget(self.btn_templates)
+        tabs_layout.addWidget(self.btn_atalhos)
+        
+        container_layout.addLayout(tabs_layout)
+        
+        # Sub-abas (Meus templates / Templates do setor OU Meus atalhos / Atalhos do setor)
+        self.sub_tabs_layout = QHBoxLayout()
+        self.sub_tabs_layout.setSpacing(20)
+        self.sub_tabs_layout.setContentsMargins(0, 5, 0, 10)  # Menos espaço no topo
+        
+        # Criar botões de sub-abas (serão recriados quando mudar de aba)
+        self.btn_meus = QPushButton('Meus templates')
+        self.btn_setor = QPushButton('Templates do setor')
+        
+        # Fonte Inter, menor
+        font_sub = QFont("Inter", 11)
+        self.btn_meus.setFont(font_sub)
+        self.btn_setor.setFont(font_sub)
+        
+        # Conectar cliques
+        self.btn_meus.clicked.connect(lambda: self.on_sub_tab_click('meus'))
+        self.btn_setor.clicked.connect(lambda: self.on_sub_tab_click('setor'))
+        
+        # Centralizar as sub-abas
+        self.sub_tabs_layout.addStretch()
+        self.sub_tabs_layout.addWidget(self.btn_meus)
+        self.sub_tabs_layout.addWidget(self.btn_setor)
+        self.sub_tabs_layout.addStretch()
+        
+        container_layout.addLayout(self.sub_tabs_layout)
+        
+        # Área de conteúdo (onde vão os cards de templates/atalhos)
+        self.content_area = QWidget()
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_area.setLayout(self.content_layout)
+        
+        container_layout.addWidget(self.content_area)
+        container_layout.addStretch()  # Espaço vazio abaixo
+        
+        # Rodapé com botão de sair (canto inferior direito)
+        footer_layout = QHBoxLayout()
+        footer_layout.setContentsMargins(0, 5, 0, 0)
+        footer_layout.addStretch()
+        
+        # SVG do ícone sair
+        svg_sair = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M7.5 17.5H4.16667C3.72464 17.5 3.30072 17.3244 2.98816 17.0118C2.67559 16.6993 2.5 16.2754 2.5 15.8333V4.16667C2.5 3.72464 2.67559 3.30072 2.98816 2.98816C3.30072 2.67559 3.72464 2.5 4.16667 2.5H7.5M13.3333 14.1667L17.5 10M17.5 10L13.3333 5.83333M17.5 10H7.5" stroke="#1E1E1E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+        
+        self.btn_sair = QPushButton()
+        self.btn_sair.setIcon(create_svg_icon(svg_sair, 20))
+        self.btn_sair.setIconSize(QSize(20, 20))
+        self.btn_sair.setFixedSize(40, 40)
+        self.btn_sair.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 0.05);
+            }
+        """)
+        self.btn_sair.clicked.connect(self.sair_programa)
+        
+        footer_layout.addWidget(self.btn_sair)
+        container_layout.addLayout(footer_layout)
+        
+        container.setLayout(container_layout)
+        
+        # Layout principal
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(container)
+        
+        self.setLayout(main_layout)
         
         # Abrir na última aba usada
         last_tab = self.db.get_config('last_tab', MainMenu._last_tab)
@@ -1933,6 +2056,136 @@ class MainMenu(QWidget):
             self.show_atalhos_tab()
         else:
             self.show_templates_tab()
+    
+    def update_tab_styles(self, selected='templates'):
+        """Atualizar estilos dos botões conforme qual está selecionado"""
+        if selected == 'templates':
+            # Templates selecionado: fundo #B97E88, fonte branca
+            self.btn_templates.setStyleSheet("""
+                QPushButton {
+                    background-color: #B97E88;
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    font-family: 'Instrument Sans';
+                    font-size: 14px;
+                }
+            """)
+            # Atalhos não selecionado: sem fundo, fonte preta
+            self.btn_atalhos.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: black;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    font-family: 'Instrument Sans';
+                    font-size: 14px;
+                }
+            """)
+        else:  # atalhos
+            # Templates não selecionado: sem fundo, fonte preta
+            self.btn_templates.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: black;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    font-family: 'Instrument Sans';
+                    font-size: 14px;
+                }
+            """)
+            # Atalhos selecionado: fundo #499714, fonte branca
+            self.btn_atalhos.setStyleSheet("""
+                QPushButton {
+                    background-color: #499714;
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    font-family: 'Instrument Sans';
+                    font-size: 14px;
+                }
+            """)
+    
+    def update_sub_tabs_styles(self, selected='meus', tab_type='templates'):
+        """Atualizar estilos das sub-abas (meus/setor) conforme seleção"""
+        # Cor do sublinhado depende da aba principal
+        underline_color = '#82414C' if tab_type == 'templates' else '#499714'
+        
+        if selected == 'meus':
+            # Botão "meus" selecionado
+            self.btn_meus.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {underline_color};
+                    border: none;
+                    border-bottom: 2px solid {underline_color};
+                    border-radius: 0px;
+                    padding: 5px 10px;
+                    font-family: 'Inter';
+                    font-size: 11px;
+                }}
+            """)
+            # Botão "setor" não selecionado
+            self.btn_setor.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: black;
+                    border: none;
+                    border-bottom: 2px solid transparent;
+                    border-radius: 0px;
+                    padding: 5px 10px;
+                    font-family: 'Inter';
+                    font-size: 11px;
+                }
+            """)
+        else:  # setor
+            # Botão "meus" não selecionado
+            self.btn_meus.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: black;
+                    border: none;
+                    border-bottom: 2px solid transparent;
+                    border-radius: 0px;
+                    padding: 5px 10px;
+                    font-family: 'Inter';
+                    font-size: 11px;
+                }
+            """)
+            # Botão "setor" selecionado
+            self.btn_setor.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {underline_color};
+                    border: none;
+                    border-bottom: 2px solid {underline_color};
+                    border-radius: 0px;
+                    padding: 5px 10px;
+                    font-family: 'Inter';
+                    font-size: 11px;
+                }}
+            """)
+    
+    def on_sub_tab_click(self, selected):
+        """Quando clica em uma sub-aba (meus/setor)"""
+        # Determinar tipo de aba atual
+        tab_type = MainMenu._last_tab  # 'templates' ou 'atalhos'
+        
+        # Salvar última sub-aba selecionada para esta aba
+        if tab_type == 'templates':
+            MainMenu._last_sub_tab_templates = selected
+        else:
+            MainMenu._last_sub_tab_atalhos = selected
+        
+        # Atualizar estilos
+        self.update_sub_tabs_styles(selected=selected, tab_type=tab_type)
+        
+        # TODO: Carregar conteúdo conforme seleção
+        print(f"Sub-aba clicada: {selected} ({tab_type})")
     
     def on_floating_add_click(self):
         """Ação do botão flutuante - adiciona template ou atalho conforme aba ativa"""
@@ -1945,55 +2198,18 @@ class MainMenu(QWidget):
         MainMenu._last_tab = 'templates'
         self.db.set_config('last_tab', 'templates')
         
-        # Atualizar cor das tabs principais
-        self.btn_templates.setStyleSheet("""
-            QPushButton {
-                background-color: #a67b7b;
-                color: white;
-                border: none;
-                padding: 15px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-        """)
-        self.btn_atalhos.setStyleSheet("""
-            QPushButton {
-                background-color: #d4c4c4;
-                color: #666;
-                border: none;
-                padding: 15px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #c4b4b4;
-            }
-        """)
+        # Atualizar estilos dos botões principais
+        self.update_tab_styles(selected='templates')
         
-        while self.content_layout.count():
-            child = self.content_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-
-        # Sub-abas: Meus Templates / Templates do Setor
-        sub_tabs = QWidget()
-        sub_layout = QHBoxLayout()
-        sub_layout.setContentsMargins(10, 8, 10, 5)  # Pequeno padding
-        sub_layout.setSpacing(15)  # Espaço entre os botões
+        # Atualizar textos das sub-abas
+        self.btn_meus.setText('Meus templates')
+        self.btn_setor.setText('Templates do setor')
         
-        self.btn_meus_templates = QPushButton('Meus Templates')
-        self.btn_setor_templates = QPushButton('Templates do Setor')
+        # Atualizar estilos das sub-abas com a última seleção
+        self.update_sub_tabs_styles(selected=MainMenu._last_sub_tab_templates, tab_type='templates')
         
-        self.btn_meus_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=True))
-        self.btn_setor_templates.clicked.connect(lambda: self.show_templates_list(apenas_meus=False))
-        
-        sub_layout.addWidget(self.btn_meus_templates)
-        sub_layout.addWidget(self.btn_setor_templates)
-        sub_tabs.setLayout(sub_layout)
-        
-        self.content_layout.addWidget(sub_tabs)
-        
-        # Mostrar templates do setor por padrão
-        self.show_templates_list(apenas_meus=False)
+        # TODO: Carregar conteúdo de templates
+        pass
 
     def show_templates_list(self, apenas_meus=False):
         """Mostrar lista de templates (meus ou do setor)"""
@@ -2223,55 +2439,18 @@ class MainMenu(QWidget):
         MainMenu._last_tab = 'atalhos'
         self.db.set_config('last_tab', 'atalhos')
         
-        # Atualizar cor das tabs principais
-        self.btn_atalhos.setStyleSheet("""
-            QPushButton {
-                background-color: #a67b7b;
-                color: white;
-                border: none;
-                padding: 15px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-        """)
-        self.btn_templates.setStyleSheet("""
-            QPushButton {
-                background-color: #d4c4c4;
-                color: #666;
-                border: none;
-                padding: 15px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #c4b4b4;
-            }
-        """)
+        # Atualizar estilos dos botões principais
+        self.update_tab_styles(selected='atalhos')
         
-        while self.content_layout.count():
-            child = self.content_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-
-        # Sub-abas: Meus Atalhos / Atalhos do Setor
-        sub_tabs = QWidget()
-        sub_layout = QHBoxLayout()
-        sub_layout.setContentsMargins(10, 8, 10, 5)  # Pequeno padding
-        sub_layout.setSpacing(15)  # Espaço entre os botões
+        # Atualizar textos das sub-abas
+        self.btn_meus.setText('Meus atalhos')
+        self.btn_setor.setText('Atalhos do setor')
         
-        self.btn_meus_atalhos = QPushButton('Meus Atalhos')
-        self.btn_setor_atalhos = QPushButton('Atalhos do Setor')
+        # Atualizar estilos das sub-abas com a última seleção
+        self.update_sub_tabs_styles(selected=MainMenu._last_sub_tab_atalhos, tab_type='atalhos')
         
-        self.btn_meus_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=True))
-        self.btn_setor_atalhos.clicked.connect(lambda: self.show_atalhos_list(apenas_meus=False))
-        
-        sub_layout.addWidget(self.btn_meus_atalhos)
-        sub_layout.addWidget(self.btn_setor_atalhos)
-        sub_tabs.setLayout(sub_layout)
-        
-        self.content_layout.addWidget(sub_tabs)
-        
-        # Mostrar atalhos do setor por padrão
-        self.show_atalhos_list(apenas_meus=False)
+        # TODO: Carregar conteúdo de atalhos
+        pass
     
     def show_atalhos_list(self, apenas_meus=False):
         """Mostrar lista de atalhos (meus ou do setor)"""
@@ -4309,8 +4488,12 @@ def main():
     def on_login_success(user_data):
         global circle
         
+        print(f"on_login_success chamado! user_data: {user_data.get('nome')}")
+        
         # Criar database com dados do usuário
         db = Database(user_id=user_data['uid'], user_setor=user_data['setor'])
+        
+        print("Database criado, criando círculo...")
         
         # Criar círculo com usuário logado
         circle = FloatingCircle(db, firebase, user_data)
@@ -4319,11 +4502,17 @@ def main():
         circle.activateWindow()
         circle.setWindowState(circle.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
         
+        print("Círculo criado e mostrado!")
+        
         # Iniciar listener de teclado
         listener = KeyboardListener(db)
         listener.start()
+        
+        print("Listener iniciado!")
     
     login_window.login_success.connect(on_login_success)
+    
+    # Mostrar janela de login sempre (auto-login desabilitado)
     login_window.show()
     
     sys.exit(app.exec())
