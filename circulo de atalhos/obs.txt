@@ -8,7 +8,6 @@ criar uma função de aprender, em que eu faço uma sequência de ações, o pro
 adicionar as condições, poder fazer assim: faz uma série de cliques, ai eu adiciono uma condição, se eu clicar alt, ai ele segue com outra série de cliques.
 criar a parte de senhas, individuais e as do setor
 adicionar função de redimensionar o tamanho do circulo e da janela
-mostrar o que mostra no terminal, pq ele n abre
 construir o design aos poucos
 
 criar um botão de confirgurações do lado de sair, onde posso:
