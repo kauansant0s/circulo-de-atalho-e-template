@@ -7,7 +7,7 @@ import hashlib
 from firebase_config import FIREBASE_CONFIG, SETORES
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
-                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox, QTabWidget)
+                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox, QTabWidget, QGraphicsDropShadowEffect)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty, QByteArray
 from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient, QFont, QPixmap, QIcon
 from PyQt6.QtSvg import QSvgRenderer
@@ -1878,6 +1878,73 @@ def create_svg_icon(svg_code, size=20):
     painter.end()
     return QIcon(pixmap)
 
+class OverlayDialog(QWidget):
+    """Widget de overlay com blur e escurecimento"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Pegar tamanho do parent
+        if parent:
+            self.setGeometry(parent.geometry())
+        
+        # Layout principal
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Fundo escuro semi-transparente (overlay)
+        self.overlay = QWidget()
+        self.overlay.setStyleSheet("""
+            QWidget {
+                background-color: rgba(0, 0, 0, 0.4);
+                border-radius: 10px;
+            }
+        """)
+        
+        overlay_layout = QVBoxLayout()
+        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Card central (janela de conteúdo) - um pouco menor que a janela principal
+        self.content_card = QWidget()
+        self.content_card.setFixedSize(320, 350)
+        self.content_card.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border-radius: 15px;
+            }
+        """)
+        
+        # Sombra do card
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30)
+        shadow.setXOffset(0)
+        shadow.setYOffset(5)
+        shadow.setColor(QColor(0, 0, 0, 100))
+        self.content_card.setGraphicsEffect(shadow)
+        
+        # Layout do card (onde vai o conteúdo)
+        self.card_layout = QVBoxLayout()
+        self.card_layout.setContentsMargins(30, 30, 30, 30)
+        self.content_card.setLayout(self.card_layout)
+        
+        overlay_layout.addWidget(self.content_card)
+        self.overlay.setLayout(overlay_layout)
+        
+        layout.addWidget(self.overlay)
+        self.setLayout(layout)
+    
+    def add_content(self, widget):
+        """Adicionar conteúdo ao card"""
+        self.card_layout.addWidget(widget)
+    
+    def mousePressEvent(self, event):
+        """Fechar ao clicar fora do card"""
+        if not self.content_card.geometry().contains(event.pos()):
+            self.close()
+        event.accept()
+
 class MainMenu(QWidget):
     _last_tab = 'templates'  # Variável de classe para lembrar última aba
     _last_sub_tab_templates = 'meus'  # Última sub-aba de templates
@@ -1968,9 +2035,6 @@ class MainMenu(QWidget):
         self.btn_templates.clicked.connect(self.show_templates_tab)
         self.btn_atalhos.clicked.connect(self.show_atalhos_tab)
         
-        # Aplicar estilo inicial (Templates selecionado)
-        self.update_tab_styles(selected='templates')
-        
         tabs_layout.addWidget(self.btn_templates)
         tabs_layout.addWidget(self.btn_atalhos)
         
@@ -2011,16 +2075,104 @@ class MainMenu(QWidget):
         container_layout.addWidget(self.content_area)
         container_layout.addStretch()  # Espaço vazio abaixo
         
-        # Rodapé com botão de sair (canto inferior direito)
+        # Rodapé com botões de configurações e sair (canto inferior direito)
         footer_layout = QHBoxLayout()
         footer_layout.setContentsMargins(0, 5, 0, 0)
+        footer_layout.setSpacing(10)
+        
+        # SVG do ícone pesquisar (lado esquerdo)
+        svg_search = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M17.5 17.5L13.875 13.875M15.8333 9.16667C15.8333 12.8486 12.8486 15.8333 9.16667 15.8333C5.48477 15.8333 2.5 12.8486 2.5 9.16667C2.5 5.48477 5.48477 2.5 9.16667 2.5C12.8486 2.5 15.8333 5.48477 15.8333 9.16667Z" stroke="#1E1E1E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+        
+        # Botão pesquisar (lado esquerdo)
+        self.btn_search = QPushButton()
+        self.btn_search.setIcon(create_svg_icon(svg_search, 20))
+        self.btn_search.setIconSize(QSize(20, 20))
+        self.btn_search.setFixedSize(40, 40)
+        self.btn_search.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 0.05);
+            }
+        """)
+        # self.btn_search.clicked.connect(...)  # Desabilitado por enquanto
+        
+        footer_layout.addWidget(self.btn_search)
         footer_layout.addStretch()
+        
+        # SVG do ícone adicionar - será recriado quando mudar de aba
+        svg_add_templates = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="20" height="20" rx="3" fill="#B97E88"/>
+<path d="M10 5.33331V14.6666M5.33337 9.99998H14.6667" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+        
+        svg_add_atalhos = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="20" height="20" rx="3" fill="#499714"/>
+<path d="M10 5.33331V14.6666M5.33337 9.99998H14.6667" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+        
+        # Guardar SVGs para trocar depois
+        self.svg_add_templates = svg_add_templates
+        self.svg_add_atalhos = svg_add_atalhos
+        
+        # SVG do ícone configurações
+        svg_config = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_13_57)">
+<path d="M10 12.5C11.3808 12.5 12.5 11.3807 12.5 9.99998C12.5 8.61927 11.3808 7.49998 10 7.49998C8.61933 7.49998 7.50004 8.61927 7.50004 9.99998C7.50004 11.3807 8.61933 12.5 10 12.5Z" stroke="#1E1E1E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M16.1667 12.5C16.0558 12.7513 16.0227 13.0301 16.0717 13.3005C16.1207 13.5708 16.2496 13.8202 16.4417 14.0166L16.4917 14.0666C16.6467 14.2214 16.7696 14.4052 16.8535 14.6076C16.9373 14.8099 16.9805 15.0268 16.9805 15.2458C16.9805 15.4648 16.9373 15.6817 16.8535 15.884C16.7696 16.0864 16.6467 16.2702 16.4917 16.425C16.3369 16.5799 16.1531 16.7029 15.9508 16.7867C15.7484 16.8706 15.5316 16.9138 15.3125 16.9138C15.0935 16.9138 14.8766 16.8706 14.6743 16.7867C14.472 16.7029 14.2882 16.5799 14.1334 16.425L14.0834 16.375C13.887 16.1829 13.6375 16.054 13.3672 16.005C13.0969 15.956 12.8181 15.989 12.5667 16.1C12.3202 16.2056 12.11 16.381 11.962 16.6046C11.8139 16.8282 11.7344 17.0902 11.7334 17.3583V17.5C11.7334 17.942 11.5578 18.3659 11.2452 18.6785C10.9327 18.9911 10.5087 19.1666 10.0667 19.1666C9.62468 19.1666 9.20076 18.9911 8.8882 18.6785C8.57564 18.3659 8.40004 17.942 8.40004 17.5V17.425C8.39359 17.1491 8.30431 16.8816 8.1438 16.6572C7.98329 16.4328 7.75899 16.2619 7.50004 16.1666C7.24869 16.0557 6.96988 16.0226 6.69955 16.0716C6.42922 16.1207 6.17977 16.2495 5.98337 16.4416L5.93337 16.4916C5.77859 16.6466 5.59477 16.7695 5.39244 16.8534C5.19011 16.9373 4.97323 16.9805 4.75421 16.9805C4.53518 16.9805 4.3183 16.9373 4.11597 16.8534C3.91364 16.7695 3.72983 16.6466 3.57504 16.4916C3.42008 16.3369 3.29715 16.153 3.21327 15.9507C3.1294 15.7484 3.08623 15.5315 3.08623 15.3125C3.08623 15.0935 3.1294 14.8766 3.21327 14.6742C3.29715 14.4719 3.42008 14.2881 3.57504 14.1333L3.62504 14.0833C3.81715 13.8869 3.94603 13.6375 3.99504 13.3671C4.04406 13.0968 4.01097 12.818 3.90004 12.5666C3.7944 12.3202 3.619 12.11 3.39543 11.9619C3.17185 11.8138 2.90986 11.7344 2.64171 11.7333H2.50004C2.05801 11.7333 1.63409 11.5577 1.32153 11.2452C1.00897 10.9326 0.833374 10.5087 0.833374 10.0666C0.833374 9.62462 1.00897 9.2007 1.32153 8.88813C1.63409 8.57557 2.05801 8.39998 2.50004 8.39998H2.57504C2.85087 8.39353 3.11838 8.30424 3.34279 8.14374C3.5672 7.98323 3.73814 7.75893 3.83337 7.49998C3.9443 7.24863 3.97739 6.96982 3.92838 6.69949C3.87936 6.42916 3.75049 6.17971 3.55837 5.98331L3.50837 5.93331C3.35341 5.77852 3.23048 5.59471 3.14661 5.39238C3.06273 5.19005 3.01956 4.97317 3.01956 4.75415C3.01956 4.53512 3.06273 4.31824 3.14661 4.11591C3.23048 3.91358 3.35341 3.72977 3.50837 3.57498C3.66316 3.42002 3.84698 3.29709 4.04931 3.21321C4.25164 3.12934 4.46851 3.08617 4.68754 3.08617C4.90657 3.08617 5.12344 3.12934 5.32577 3.21321C5.5281 3.29709 5.71192 3.42002 5.86671 3.57498L5.91671 3.62498C6.11311 3.81709 6.36255 3.94597 6.63288 3.99498C6.90321 4.044 7.18203 4.01091 7.43337 3.89998H7.50004C7.74651 3.79434 7.95672 3.61894 8.10478 3.39537C8.25285 3.17179 8.3323 2.9098 8.33337 2.64165V2.49998C8.33337 2.05795 8.50897 1.63403 8.82153 1.32147C9.13409 1.00891 9.55801 0.833313 10 0.833313C10.4421 0.833313 10.866 1.00891 11.1786 1.32147C11.4911 1.63403 11.6667 2.05795 11.6667 2.49998V2.57498C11.6678 2.84313 11.7472 3.10513 11.8953 3.3287C12.0434 3.55228 12.2536 3.72768 12.5 3.83331C12.7514 3.94424 13.0302 3.97733 13.3005 3.92832C13.5709 3.8793 13.8203 3.75043 14.0167 3.55831L14.0667 3.50831C14.2215 3.35335 14.4053 3.23042 14.6076 3.14655C14.81 3.06267 15.0268 3.0195 15.2459 3.0195C15.4649 3.0195 15.6818 3.06267 15.8841 3.14655C16.0864 3.23042 16.2702 3.35335 16.425 3.50831C16.58 3.6631 16.7029 3.84692 16.7868 4.04925C16.8707 4.25158 16.9139 4.46845 16.9139 4.68748C16.9139 4.90651 16.8707 5.12338 16.7868 5.32571C16.7029 5.52804 16.58 5.71186 16.425 5.86665L16.375 5.91665C16.1829 6.11304 16.0541 6.36249 16.005 6.63282C15.956 6.90315 15.9891 7.18197 16.1 7.43331V7.49998C16.2057 7.74645 16.3811 7.95666 16.6047 8.10472C16.8282 8.25279 17.0902 8.33224 17.3584 8.33331H17.5C17.9421 8.33331 18.366 8.50891 18.6786 8.82147C18.9911 9.13403 19.1667 9.55795 19.1667 9.99998C19.1667 10.442 18.9911 10.8659 18.6786 11.1785C18.366 11.4911 17.9421 11.6666 17.5 11.6666H17.425C17.1569 11.6677 16.8949 11.7472 16.6713 11.8952C16.4477 12.0433 16.2723 12.2535 16.1667 12.5Z" stroke="#1E1E1E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+<defs>
+<clipPath id="clip0_13_57">
+<rect width="20" height="20" fill="white"/>
+</clipPath>
+</defs>
+</svg>"""
         
         # SVG do ícone sair
         svg_sair = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
 <path d="M7.5 17.5H4.16667C3.72464 17.5 3.30072 17.3244 2.98816 17.0118C2.67559 16.6993 2.5 16.2754 2.5 15.8333V4.16667C2.5 3.72464 2.67559 3.30072 2.98816 2.98816C3.30072 2.67559 3.72464 2.5 4.16667 2.5H7.5M13.3333 14.1667L17.5 10M17.5 10L13.3333 5.83333M17.5 10H7.5" stroke="#1E1E1E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>"""
         
+        # Botão adicionar (+ com fundo colorido)
+        self.btn_add = QPushButton()
+        self.btn_add.setIcon(create_svg_icon(svg_add_templates, 20))  # Começa com cor de templates
+        self.btn_add.setIconSize(QSize(20, 20))
+        self.btn_add.setFixedSize(40, 40)
+        self.btn_add.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 0.05);
+            }
+        """)
+        self.btn_add.clicked.connect(self.show_add_overlay)  # Habilitado!
+        
+        # Botão configurações
+        self.btn_config = QPushButton()
+        self.btn_config.setIcon(create_svg_icon(svg_config, 20))
+        self.btn_config.setIconSize(QSize(20, 20))
+        self.btn_config.setFixedSize(40, 40)
+        self.btn_config.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 0.05);
+            }
+        """)
+        # self.btn_config.clicked.connect(self.show_config_tab)  # Desabilitado por enquanto
+        
+        # Botão sair
         self.btn_sair = QPushButton()
         self.btn_sair.setIcon(create_svg_icon(svg_sair, 20))
         self.btn_sair.setIconSize(QSize(20, 20))
@@ -2035,8 +2187,10 @@ class MainMenu(QWidget):
                 background-color: rgba(0, 0, 0, 0.05);
             }
         """)
-        self.btn_sair.clicked.connect(self.sair_programa)
+        # self.btn_sair.clicked.connect(self.sair_programa)  # Desabilitado por enquanto
         
+        footer_layout.addWidget(self.btn_add)
+        footer_layout.addWidget(self.btn_config)
         footer_layout.addWidget(self.btn_sair)
         container_layout.addLayout(footer_layout)
         
@@ -2084,6 +2238,8 @@ class MainMenu(QWidget):
                     font-size: 14px;
                 }
             """)
+            # Atualizar ícone do botão adicionar para rosa
+            self.btn_add.setIcon(create_svg_icon(self.svg_add_templates, 20))
         else:  # atalhos
             # Templates não selecionado: sem fundo, fonte preta
             self.btn_templates.setStyleSheet("""
@@ -2109,6 +2265,8 @@ class MainMenu(QWidget):
                     font-size: 14px;
                 }
             """)
+            # Atualizar ícone do botão adicionar para verde
+            self.btn_add.setIcon(create_svg_icon(self.svg_add_atalhos, 20))
     
     def update_sub_tabs_styles(self, selected='meus', tab_type='templates'):
         """Atualizar estilos das sub-abas (meus/setor) conforme seleção"""
@@ -2186,6 +2344,16 @@ class MainMenu(QWidget):
         
         # TODO: Carregar conteúdo conforme seleção
         print(f"Sub-aba clicada: {selected} ({tab_type})")
+    
+    def show_add_overlay(self):
+        """Mostrar overlay para adicionar template ou atalho"""
+        # Criar overlay
+        self.overlay_widget = OverlayDialog(self)
+        
+        # Por enquanto sem conteúdo (vazio para teste)
+        
+        # Mostrar overlay
+        self.overlay_widget.show()
     
     def on_floating_add_click(self):
         """Ação do botão flutuante - adiciona template ou atalho conforme aba ativa"""
