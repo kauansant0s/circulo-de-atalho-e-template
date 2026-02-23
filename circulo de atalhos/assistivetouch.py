@@ -3,13 +3,15 @@ import sqlite3
 import time
 import json
 import requests
+from io import BytesIO
+from PIL import Image, ImageFilter
 import hashlib
 from firebase_config import FIREBASE_CONFIG, SETORES
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea, QListWidget, 
-                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox, QTabWidget, QGraphicsDropShadowEffect)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty, QByteArray
-from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient, QFont, QPixmap, QIcon
+                              QListWidgetItem, QSpinBox, QComboBox, QCheckBox, QGroupBox, QTabWidget, QGraphicsDropShadowEffect, QGraphicsBlurEffect, QFrame)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, pyqtSignal, QRect, QMimeData, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty, QByteArray, QBuffer, QIODevice, QSequentialAnimationGroup
+from PyQt6.QtGui import QCursor, QPainter, QColor, QDrag, QPen, QRadialGradient, QFont, QPixmap, QIcon, QPainterPath
 from PyQt6.QtSvg import QSvgRenderer
 from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
@@ -1787,8 +1789,8 @@ class FloatingCircle(QWidget):
         
         self.menu.destroyed.connect(on_menu_closed)
         
-        # Posição final do menu
-        menu_x = self.x() - 360
+        # Posição final do menu (ajustado para 450)
+        menu_x = self.x() - 450
         menu_y = self.y()
         
         # Tentar animação, mas garantir que menu apareça
@@ -1879,35 +1881,27 @@ def create_svg_icon(svg_code, size=20):
     return QIcon(pixmap)
 
 class OverlayDialog(QWidget):
-    """Widget de overlay com blur e escurecimento"""
+    """Widget de overlay com blur usando snapshot"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Pegar tamanho do parent
+        # Cobrir todo o parent
         if parent:
-            self.setGeometry(parent.geometry())
+            self.setGeometry(0, 0, parent.width(), parent.height())
+        
+        # Capturar screenshot do parent
+        self.background_pixmap = None
+        if parent:
+            self.background_pixmap = parent.grab()
         
         # Layout principal
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Fundo escuro semi-transparente (overlay)
-        self.overlay = QWidget()
-        self.overlay.setStyleSheet("""
-            QWidget {
-                background-color: rgba(0, 0, 0, 0.4);
-                border-radius: 10px;
-            }
-        """)
-        
-        overlay_layout = QVBoxLayout()
-        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        # Card central (janela de conteúdo) - um pouco menor que a janela principal
+        # Card central (janela de conteúdo)
         self.content_card = QWidget()
-        self.content_card.setFixedSize(320, 350)
+        self.content_card.setFixedSize(410, 450)  # Aumentado proporcionalmente
         self.content_card.setStyleSheet("""
             QWidget {
                 background-color: white;
@@ -1915,25 +1909,58 @@ class OverlayDialog(QWidget):
             }
         """)
         
-        # Sombra do card
-        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(30)
-        shadow.setXOffset(0)
-        shadow.setYOffset(5)
-        shadow.setColor(QColor(0, 0, 0, 100))
-        self.content_card.setGraphicsEffect(shadow)
-        
         # Layout do card (onde vai o conteúdo)
         self.card_layout = QVBoxLayout()
-        self.card_layout.setContentsMargins(30, 30, 30, 30)
+        self.card_layout.setContentsMargins(20, 20, 20, 20)
+        self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)  # Alinhar conteúdo no topo
         self.content_card.setLayout(self.card_layout)
         
-        overlay_layout.addWidget(self.content_card)
-        self.overlay.setLayout(overlay_layout)
-        
-        layout.addWidget(self.overlay)
+        layout.addWidget(self.content_card)
         self.setLayout(layout)
+        
+        # Trazer para frente
+        self.raise_()
+    
+    def paintEvent(self, event):
+        """Desenhar background com blur usando PIL"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        if self.background_pixmap:
+            # Converter QPixmap para bytes usando QBuffer
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            self.background_pixmap.save(buffer, 'PNG')
+            buffer.close()
+            
+            # Converter para PIL Image
+            pil_image = Image.open(BytesIO(byte_array.data()))
+            
+            # Aplicar blur (radius menor para ser mais sutil)
+            blurred_image = pil_image.filter(ImageFilter.GaussianBlur(radius=5))
+            
+            # Converter de volta para QPixmap
+            blurred_buffer = BytesIO()
+            blurred_image.save(blurred_buffer, 'PNG')
+            blurred_buffer.seek(0)
+            
+            blurred_pixmap = QPixmap()
+            blurred_pixmap.loadFromData(blurred_buffer.getvalue())
+            
+            # Criar path com bordas arredondadas
+            from PyQt6.QtGui import QPainterPath
+            path = QPainterPath()
+            path.addRoundedRect(0, 0, self.width(), self.height(), 10, 10)
+            painter.setClipPath(path)
+            
+            # Desenhar imagem com blur
+            painter.drawPixmap(0, 0, blurred_pixmap)
+            
+            # Desenhar overlay escuro por cima
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        
+        super().paintEvent(event)
     
     def add_content(self, widget):
         """Adicionar conteúdo ao card"""
@@ -1941,9 +1968,14 @@ class OverlayDialog(QWidget):
     
     def mousePressEvent(self, event):
         """Fechar ao clicar fora do card"""
-        if not self.content_card.geometry().contains(event.pos()):
+        # Converter posição do evento para coordenadas do card
+        card_pos = self.content_card.mapToParent(QPoint(0, 0))
+        card_rect = QRect(card_pos, self.content_card.size())
+        
+        if not card_rect.contains(event.pos()):
             self.close()
-        event.accept()
+        else:
+            event.ignore()  # Deixar o card processar o evento
 
 class MainMenu(QWidget):
     _last_tab = 'templates'  # Variável de classe para lembrar última aba
@@ -2003,7 +2035,7 @@ class MainMenu(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        self.setFixedSize(350, 400)
+        self.setFixedSize(450, 520)  # Aumentado proporcionalmente (~30%)
         
         # Container com bordas arredondadas
         container = QWidget()
@@ -2347,13 +2379,278 @@ class MainMenu(QWidget):
     
     def show_add_overlay(self):
         """Mostrar overlay para adicionar template ou atalho"""
-        # Criar overlay
+        # Criar overlay (ele já cobre toda a janela e escurece)
         self.overlay_widget = OverlayDialog(self)
         
-        # Por enquanto sem conteúdo (vazio para teste)
+        # Adicionar título no topo
+        title = QLabel("Criação de template")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("""
+            QLabel {
+                font-family: 'Inter';
+                font-size: 16px;
+                font-weight: bold;
+                color: black;
+                padding: 0px 0px 15px 0px;
+            }
+        """)
+        self.overlay_widget.add_content(title)
+        
+        # Campo: Título do template
+        self.template_title_input = QLineEdit()
+        self.template_title_input.setPlaceholderText("Título do template")
+        self.template_title_input.setStyleSheet("""
+            QLineEdit {
+                padding: 10px;
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                font-size: 13px;
+                background-color: white;
+                color: black;
+            }
+            QLineEdit:focus {
+                border: 2px solid #B97E88;
+            }
+            QLineEdit::placeholder {
+                color: #999;
+            }
+        """)
+        self.overlay_widget.add_content(self.template_title_input)
+        
+        # Campo: Atalho (opcional)
+        self.template_shortcut_input = QLineEdit()
+        self.template_shortcut_input.setPlaceholderText("Atalho (opcional)")
+        self.template_shortcut_input.setStyleSheet("""
+            QLineEdit {
+                padding: 10px;
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                font-size: 13px;
+                background-color: white;
+                color: black;
+            }
+            QLineEdit:focus {
+                border: 2px solid #B97E88;
+            }
+            QLineEdit::placeholder {
+                color: #999;
+            }
+        """)
+        self.overlay_widget.add_content(self.template_shortcut_input)
+        
+        # Campo: Conteúdo do template (maior) - envolvido em QFrame para ter borda
+        content_frame = QFrame()
+        content_frame.setStyleSheet("""
+            QFrame {
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                background-color: white;
+            }
+            QFrame:focus-within {
+                border: 2px solid #B97E88;
+            }
+        """)
+        content_frame_layout = QVBoxLayout()
+        content_frame_layout.setContentsMargins(0, 0, 0, 0)
+        content_frame_layout.setSpacing(0)
+        
+        self.template_content_input = QTextEdit()
+        self.template_content_input.setPlaceholderText("Conteúdo do template")
+        self.template_content_input.setStyleSheet("""
+            QTextEdit {
+                padding: 8px;
+                border: none;
+                font-size: 13px;
+                background-color: transparent;
+                color: black;
+            }
+        """)
+        # Forçar cor do placeholder
+        palette = self.template_content_input.palette()
+        palette.setColor(palette.ColorRole.PlaceholderText, QColor("#999"))
+        self.template_content_input.setPalette(palette)
+        
+        content_frame_layout.addWidget(self.template_content_input)
+        content_frame.setLayout(content_frame_layout)
+        self.overlay_widget.add_content(content_frame)
+        
+        # Botões na parte inferior
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(10)
+        buttons_layout.addStretch()
+        
+        # Botão Criar (fundo rosa)
+        btn_criar = QPushButton("Criar")
+        btn_criar.setFixedWidth(90)  # Tamanho fixo
+        btn_criar.setStyleSheet("""
+            QPushButton {
+                font-family: 'Inter';
+                font-size: 13px;
+                color: white;
+                background-color: #82414C;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #6d3640;
+            }
+        """)
+        btn_criar.clicked.connect(self.create_template)
+        
+        # Botão Cancelar (fundo transparente, borda rosa)
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.setFixedWidth(90)  # Mesmo tamanho
+        btn_cancelar.setStyleSheet("""
+            QPushButton {
+                font-family: 'Inter';
+                font-size: 13px;
+                color: #82414C;
+                background-color: transparent;
+                border: 2px solid #82414C;
+                border-radius: 6px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(130, 65, 76, 0.1);
+            }
+        """)
+        btn_cancelar.clicked.connect(self.overlay_widget.close)
+        
+        buttons_layout.addWidget(btn_criar)
+        buttons_layout.addWidget(btn_cancelar)
+        
+        # Adicionar layout de botões ao overlay
+        buttons_widget = QWidget()
+        buttons_widget.setLayout(buttons_layout)
+        self.overlay_widget.add_content(buttons_widget)
         
         # Mostrar overlay
         self.overlay_widget.show()
+    
+    def create_template(self):
+        """Criar template no Firebase"""
+        # Pegar valores dos campos
+        titulo = self.template_title_input.text().strip()
+        atalho = self.template_shortcut_input.text().strip()
+        conteudo = self.template_content_input.toPlainText().strip()
+        
+        # Validar campos obrigatórios com animação
+        if not titulo:
+            self.show_field_error(self.template_title_input, "Este campo é obrigatório")
+            return
+        
+        if not conteudo:
+            # Para QTextEdit dentro de QFrame, animar o frame
+            self.show_field_error(self.template_content_input.parent(), "Este campo é obrigatório")
+            self.template_content_input.setFocus()
+            return
+        
+        # Criar template no Firebase
+        try:
+            template_data = {
+                'titulo': titulo,
+                'conteudo': conteudo,
+                'usuario_id': self.user_data['uid'],
+                'setor': self.user_data.get('setor', ''),
+                'criado_em': time.time()
+            }
+            
+            # Adicionar atalho se fornecido
+            if atalho:
+                template_data['atalho'] = atalho
+            
+            # Salvar no Firestore
+            result = self.firebase.db.collection('templates').add(template_data)
+            
+            print(f"Template criado com ID: {result[1].id}")
+            
+            # Fechar overlay
+            self.overlay_widget.close()
+            
+            # Mostrar mensagem de sucesso
+            QMessageBox.information(self, "Sucesso", "Template criado com sucesso!")
+            
+            # TODO: Atualizar lista de templates na tela
+            
+        except Exception as e:
+            print(f"Erro ao criar template: {e}")
+            QMessageBox.critical(self, "Erro", f"Erro ao criar template: {str(e)}")
+    
+    def show_field_error(self, widget, message):
+        """Mostrar erro no campo com animação de shake e tooltip"""
+        # Salvar estilo original
+        original_style = widget.styleSheet()
+        
+        # Aplicar borda vermelha
+        if isinstance(widget, QLineEdit):
+            widget.setStyleSheet("""
+                QLineEdit {
+                    padding: 10px;
+                    border: 2px solid #ff4444;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    background-color: white;
+                    color: black;
+                }
+                QLineEdit::placeholder {
+                    color: #999;
+                }
+            """)
+        elif isinstance(widget, QFrame):
+            widget.setStyleSheet("""
+                QFrame {
+                    border: 2px solid #ff4444;
+                    border-radius: 8px;
+                    background-color: white;
+                }
+            """)
+        
+        # Mostrar tooltip
+        widget.setToolTip(message)
+        QTimer.singleShot(100, lambda: widget.setToolTip(message))
+        
+        # Animação de shake (tremer)
+        original_pos = widget.pos()
+        
+        shake_anim = QSequentialAnimationGroup()
+        
+        # Shake para direita e esquerda
+        for i in range(3):
+            # Mover para direita
+            anim1 = QPropertyAnimation(widget, b"pos")
+            anim1.setDuration(50)
+            anim1.setStartValue(QPoint(original_pos.x(), original_pos.y()))
+            anim1.setEndValue(QPoint(original_pos.x() + 10, original_pos.y()))
+            
+            # Mover para esquerda
+            anim2 = QPropertyAnimation(widget, b"pos")
+            anim2.setDuration(50)
+            anim2.setStartValue(QPoint(original_pos.x() + 10, original_pos.y()))
+            anim2.setEndValue(QPoint(original_pos.x() - 10, original_pos.y()))
+            
+            shake_anim.addAnimation(anim1)
+            shake_anim.addAnimation(anim2)
+        
+        # Voltar para posição original
+        anim_back = QPropertyAnimation(widget, b"pos")
+        anim_back.setDuration(50)
+        anim_back.setStartValue(QPoint(original_pos.x() - 10, original_pos.y()))
+        anim_back.setEndValue(original_pos)
+        shake_anim.addAnimation(anim_back)
+        
+        shake_anim.start()
+        
+        # Remover borda vermelha e tooltip após 3 segundos
+        def reset_style():
+            widget.setStyleSheet(original_style)
+            widget.setToolTip("")
+        
+        QTimer.singleShot(3000, reset_style)
+        
+        # Focar no campo
+        if isinstance(widget, QLineEdit):
+            widget.setFocus()
     
     def on_floating_add_click(self):
         """Ação do botão flutuante - adiciona template ou atalho conforme aba ativa"""
