@@ -9,7 +9,7 @@ from firebase_config import FIREBASE_CONFIG, SETORES
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                               QLabel, QLineEdit, QTextEdit, QMessageBox, QScrollArea,
                               QListWidget, QListWidgetItem, QSpinBox, QComboBox, QCheckBox,
-                              QTabWidget, QFrame)
+                              QTabWidget, QFrame, QStackedWidget)
 from PyQt6.QtCore import (Qt, QPoint, QTimer, QObject, pyqtSignal, QRect,
                            QPropertyAnimation, QEasingCurve, QSize, pyqtProperty,
                            QByteArray, QBuffer, QIODevice, QSequentialAnimationGroup)
@@ -83,6 +83,7 @@ class FirebaseAuth:
         self.id_token     = None
         self._cache_templates = {}  # chave: (field, value) → lista
         self._cache_shortcuts = {}  # chave: (field, value) → lista
+        self._cache_nomes     = {}  # chave: uid → nome
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _base(self, collection, doc_id=''):
@@ -180,6 +181,12 @@ class FirebaseAuth:
             fields = resp.json().get('fields', {})
             return self._fields_to_dict(fields)
         return None
+
+    def get_user_nome(self, uid):
+        if uid not in self._cache_nomes:
+            data = self.get_user_data(uid)
+            self._cache_nomes[uid] = data.get('nome', '?') if data else '?'
+        return self._cache_nomes[uid]
 
     def get_pending_users(self):
         resp = requests.get(self._base('pending_users'), headers=self._headers())
@@ -1186,6 +1193,54 @@ class OverlayDialog(QWidget):
             event.ignore()
 
 
+def show_confirm(parent, message, on_confirm):
+    """Mostra um diálogo de confirmação com fundo borrado sobre o parent."""
+    overlay = OverlayDialog(parent)
+    overlay.content_card.setFixedSize(260, 120)
+
+    lbl = QLabel(message)
+    lbl.setStyleSheet("font-family:'Instrument Sans'; font-size:13px; color:#2d2d2d; background:transparent; border:none;")
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lbl.setWordWrap(True)
+    overlay.add_content(lbl)
+
+    overlay.card_layout.addStretch()
+
+    btns = QHBoxLayout()
+    btns.setSpacing(10)
+
+    b_nao = QPushButton("Não")
+    b_nao.setFixedHeight(36)
+    b_nao.setStyleSheet("""
+        QPushButton { font-family:'Instrument Sans'; font-size:13px; color:#2d2d2d;
+            background:transparent; border:2px solid #ccc; border-radius:8px; }
+        QPushButton:hover { background:rgba(0,0,0,0.05); }
+    """)
+    b_nao.clicked.connect(overlay.close)
+
+    b_sim = QPushButton("Sim")
+    b_sim.setFixedHeight(36)
+    b_sim.setStyleSheet("""
+        QPushButton { font-family:'Instrument Sans'; font-size:13px; color:white;
+            background:#900B09; border:none; border-radius:8px; }
+        QPushButton:hover { background:#7a0908; }
+    """)
+    def _confirm():
+        overlay.close()
+        on_confirm()
+    b_sim.clicked.connect(_confirm)
+
+    btns.addWidget(b_nao)
+    btns.addWidget(b_sim)
+    bw = QWidget()
+    bw.setStyleSheet("background:transparent; border:none;")
+    bw.setLayout(btns)
+    overlay.add_content(bw)
+
+    overlay.show()
+    return overlay
+
+
 # ---------------------------------------------------------------------------
 # MainMenu
 # ---------------------------------------------------------------------------
@@ -1193,6 +1248,7 @@ class MainMenu(QWidget):
     _last_tab             = 'templates'
     _last_sub_tab_templates = 'meus'
     _last_sub_tab_atalhos   = 'meus'
+    _templates_loaded = pyqtSignal(list, bool)
 
     def __init__(self, firebase, user_data, parent=None):
         super().__init__(parent)
@@ -1200,6 +1256,7 @@ class MainMenu(QWidget):
         self.user_data   = user_data
         self.circle_parent = parent
         self.add_window  = None
+        self._templates_loaded.connect(self._on_templates_loaded)
         self.init_ui()
 
     # ── fechamento ────────────────────────────────────────────────────────────
@@ -1264,17 +1321,40 @@ class MainMenu(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setStyleSheet("QScrollArea { border:none; background:transparent; }")
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea { border:none; background:transparent; }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical {
+                background: #c0c0c0;
+                border-radius: 3px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #a0a0a0;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
 
         self.content_area = QWidget()
         self.content_layout = QVBoxLayout()
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setContentsMargins(0, 0, 8, 0)
         self.content_layout.setSpacing(6)
         self.content_area.setLayout(self.content_layout)
         self.scroll_area.setWidget(self.content_area)
-        cl.addWidget(self.scroll_area)
-
-        cl.addStretch()
+        cl.addWidget(self.scroll_area, stretch=1)
 
         # rodapé
         footer = QHBoxLayout(); footer.setContentsMargins(0, 5, 0, 0); footer.setSpacing(10)
@@ -1299,8 +1379,67 @@ class MainMenu(QWidget):
         svg_sair = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
 <path d="M7.5 17.5H4.16667C3.72464 17.5 3.30072 17.3244 2.98816 17.0118C2.67559 16.6993 2.5 16.2754 2.5 15.8333V4.16667C2.5 3.72464 2.67559 3.30072 2.98816 2.98816C3.30072 2.67559 3.72464 2.5 4.16667 2.5H7.5M13.3333 14.1667L17.5 10M17.5 10L13.3333 5.83333M17.5 10H7.5" stroke="#1E1E1E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
 
+        # campo de pesquisa com lupa interna
+        self.search_container = QWidget()
+        self.search_container.setVisible(False)
+        self.search_container.setStyleSheet("""
+            QWidget {
+                background: #929187;
+                border-radius: 12px;
+            }
+        """)
+        sc_layout = QHBoxLayout(self.search_container)
+        sc_layout.setContentsMargins(12, 0, 8, 0)
+        sc_layout.setSpacing(4)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Pesquisar...")
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background: transparent;
+                border: none;
+                font-family: 'Instrument Sans';
+                font-size: 13px;
+                color: white;
+            }
+            QLineEdit::placeholder { color: rgba(255,255,255,0.6); }
+        """)
+        self.search_input.setFixedHeight(36)
+        self.search_input.textChanged.connect(self.on_search_changed)
+
+        svg_search_inner = """<svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M17.5 17.5L13.875 13.875M15.8333 9.16667C15.8333 12.8486 12.8486 15.8333 9.16667 15.8333C5.48477 15.8333 2.5 12.8486 2.5 9.16667C2.5 5.48477 5.48477 2.5 9.16667 2.5C12.8486 2.5 15.8333 5.48477 15.8333 9.16667Z" stroke="#1E1E1E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
+        self.lupa_btn = QPushButton()
+        self.lupa_btn.setIcon(create_svg_icon(svg_search_inner, 18))
+        self.lupa_btn.setIconSize(QSize(18, 18))
+        self.lupa_btn.setFixedSize(28, 28)
+        self.lupa_btn.setStyleSheet("QPushButton{background:transparent;border:none;}")
+        self.lupa_btn.clicked.connect(self.toggle_search)
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+        self._lupa_effect = QGraphicsOpacityEffect()
+        self._lupa_effect.setOpacity(1.0)
+        self.lupa_btn.setGraphicsEffect(self._lupa_effect)
+
+        sc_layout.addWidget(self.search_input)
+
+        # lupa interna (visível só quando campo aberto, com 60% opacidade)
+        svg_search_inner = """<svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M17.5 17.5L13.875 13.875M15.8333 9.16667C15.8333 12.8486 12.8486 15.8333 9.16667 15.8333C5.48477 15.8333 2.5 12.8486 2.5 9.16667C2.5 5.48477 5.48477 2.5 9.16667 2.5C12.8486 2.5 15.8333 5.48477 15.8333 9.16667Z" stroke="#1E1E1E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
+        self.lupa_interna = QPushButton()
+        self.lupa_interna.setIcon(create_svg_icon(svg_search_inner, 18))
+        self.lupa_interna.setIconSize(QSize(18, 18))
+        self.lupa_interna.setFixedSize(28, 28)
+        self.lupa_interna.setStyleSheet("QPushButton{background:transparent;border:none;}")
+        self.lupa_interna.clicked.connect(self.toggle_search)
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+        self._lupa_effect = QGraphicsOpacityEffect()
+        self._lupa_effect.setOpacity(0.6)
+        self.lupa_interna.setGraphicsEffect(self._lupa_effect)
+        sc_layout.addWidget(self.lupa_interna)
+
         self.svg_add_templates = svg_add_t
         self.svg_add_atalhos   = svg_add_a
+        self._search_open = False
 
         def icon_btn(svg):
             b = QPushButton()
@@ -1310,12 +1449,17 @@ class MainMenu(QWidget):
             b.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:8px;}QPushButton:hover{background:rgba(0,0,0,0.05);}")
             return b
 
+        # lupa externa (visível só quando campo fechado)
         self.btn_search = icon_btn(svg_search)
+        self.btn_search.clicked.connect(self.toggle_search)
         self.btn_add    = icon_btn(svg_add_t)
         self.btn_add.clicked.connect(self.show_add_overlay)
         self.btn_config = icon_btn(svg_config)
+        self.btn_config.clicked.connect(self.show_config_tab)
         self.btn_sair   = icon_btn(svg_sair)
+        self.btn_sair.clicked.connect(self.confirmar_sair)
 
+        footer.addWidget(self.search_container, stretch=1)
         footer.addWidget(self.btn_search)
         footer.addStretch()
         footer.addWidget(self.btn_add)
@@ -1324,8 +1468,21 @@ class MainMenu(QWidget):
         cl.addLayout(footer)
 
         container.setLayout(cl)
+
+        # tela de configurações (página 1 do stack) — conteúdo gerado em show_config_tab
+        self.config_page = QWidget()
+        self.config_page.setStyleSheet("QWidget { background-color:#DEDDD2; border-radius:10px; }")
+        config_layout = QVBoxLayout(self.config_page)
+        config_layout.setContentsMargins(15, 15, 15, 15)
+        config_layout.setSpacing(10)
+        self.config_content_layout = config_layout
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(container)       # índice 0 — menu principal
+        self.stack.addWidget(self.config_page) # índice 1 — configurações
+
         ml = QVBoxLayout(); ml.setContentsMargins(0,0,0,0); ml.setSpacing(0)
-        ml.addWidget(container)
+        ml.addWidget(self.stack)
         self.setLayout(ml)
 
         last = self.firebase.get_config('last_tab', MainMenu._last_tab)
@@ -1397,7 +1554,7 @@ class MainMenu(QWidget):
         self.btn_setor.setText('Atalhos do setor')
         sub = MainMenu._last_sub_tab_atalhos
         self.update_sub_tabs_styles(sub, 'atalhos')
-        self._load_atalhos(apenas_meus=(sub == 'meus'))
+        self._clear_content()
 
     def _clear_content(self):
         while self.content_layout.count():
@@ -1411,9 +1568,20 @@ class MainMenu(QWidget):
         uid   = self.user_data['uid']
         setor = self.user_data['setor']
 
-        templates = (self.firebase.get_templates_meus(uid) if apenas_meus
-                     else self.firebase.get_templates_setor(setor))
+        import threading
+        def run():
+            result = (self.firebase.get_templates_meus(uid) if apenas_meus
+                      else self.firebase.get_templates_setor(setor))
+            # para aba do setor, pre-carrega nomes dos criadores (usa cache)
+            if not apenas_meus:
+                for t in result:
+                    self.firebase.get_user_nome(t['usuario_id'])
+            self._templates_loaded.emit(result, apenas_meus)
 
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_templates_loaded(self, templates, apenas_meus):
+        self._clear_content()
         if not templates:
             lbl = QLabel('Nenhum template encontrado')
             lbl.setStyleSheet('color:#999; font-style:italic; padding:20px;')
@@ -1422,44 +1590,78 @@ class MainMenu(QWidget):
         else:
             for t in templates:
                 self.content_layout.addWidget(self._template_card(t, apenas_meus))
-
         self.content_layout.addStretch()
 
     def _template_card(self, t, apenas_meus):
         card = QWidget()
-        card.setStyleSheet("""
-            QWidget { background-color:white; border-radius:8px; border:1px solid #e0e0e0; }
-            QWidget:hover { border:1px solid #B97E88; }
-        """)
-        lay = QVBoxLayout(); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(4)
+        has_atalho = bool(t.get('atalho'))
+        card.setFixedHeight(80 if has_atalho else 65)
+        card.setStyleSheet("QWidget { border: 1.5px solid #909090; border-radius: 10px; background: transparent; }")
 
-        nome_lbl = QLabel(t['nome'])
-        nome_lbl.setStyleSheet('font-size:13px; font-weight:bold; color:#2d2d2d;')
-        lay.addWidget(nome_lbl)
+        # layout principal: conteúdo à esquerda, botões à direita
+        outer = QHBoxLayout(card)
+        outer.setContentsMargins(12, 8, 8, 8)
+        outer.setSpacing(0)
 
-        preview = t['texto'][:60] + '...' if len(t['texto']) > 60 else t['texto']
-        prev_lbl = QLabel(preview)
-        prev_lbl.setStyleSheet('font-size:11px; color:#888;')
-        lay.addWidget(prev_lbl)
+        # coluna de texto
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        nome = QLabel(t['nome'])
+        nome.setStyleSheet("font-family: 'Instrument Sans'; font-size: 13px; font-weight: 500; color: black; background: transparent; border: none;")
+        text_col.addWidget(nome)
+
+        preview = QLabel()
+        preview.setStyleSheet("font-family: 'Instrument Sans'; font-size: 11px; font-weight: 400; color: #828282; background: transparent; border: none;")
+        fm = preview.fontMetrics()
+        elided = fm.elidedText(t['texto'].replace('\n', ' '), Qt.TextElideMode.ElideRight, 330)
+        preview.setText(elided)
+        text_col.addWidget(preview)
 
         if t.get('atalho'):
-            atl_lbl = QLabel(f"Atalho: {t['atalho']}")
-            atl_lbl.setStyleSheet('font-size:10px; color:#B97E88;')
-            lay.addWidget(atl_lbl)
+            atalho = QLabel(f"atalho: <b>{t['atalho']}</b>")
+            atalho.setStyleSheet("font-family: 'Instrument Sans'; font-size: 11px; font-weight: 400; color: #88C22B; background: transparent; border: none;")
+            atalho.setTextFormat(Qt.TextFormat.RichText)
+            text_col.addWidget(atalho)
 
-        # botões (só aparecem se é do próprio usuário)
-        if t.get('usuario_id') == self.user_data['uid']:
-            btns = QHBoxLayout(); btns.addStretch()
-            b_edit = QPushButton('✎ Editar')
-            b_edit.setStyleSheet("QPushButton{color:#406e54;background:transparent;border:none;font-size:11px;}QPushButton:hover{text-decoration:underline;}")
-            b_edit.clicked.connect(lambda _, tmpl=t: self.edit_template(tmpl))
-            b_del = QPushButton('🗑 Excluir')
-            b_del.setStyleSheet("QPushButton{color:#82414c;background:transparent;border:none;font-size:11px;}QPushButton:hover{text-decoration:underline;}")
-            b_del.clicked.connect(lambda _, tmpl=t: self.delete_template(tmpl))
-            btns.addWidget(b_edit); btns.addWidget(b_del)
-            lay.addLayout(btns)
+        outer.addLayout(text_col, stretch=1)
 
-        card.setLayout(lay)
+        # coluna de botões (dono na aba "meus") ou "Criado por" (aba do setor)
+        if t.get('usuario_id') == self.user_data['uid'] and apenas_meus:
+            svg_del = """<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M2 3.99998H3.33333M3.33333 3.99998H14M3.33333 3.99998L3.33333 13.3333C3.33333 13.6869 3.47381 14.0261 3.72386 14.2761C3.97391 14.5262 4.31304 14.6666 4.66667 14.6666H11.3333C11.687 14.6666 12.0261 14.5262 12.2761 14.2761C12.5262 14.0261 12.6667 13.6869 12.6667 13.3333V3.99998M5.33333 3.99998V2.66665C5.33333 2.31302 5.47381 1.97389 5.72386 1.72384C5.97391 1.47379 6.31304 1.33331 6.66667 1.33331H9.33333C9.68696 1.33331 10.0261 1.47379 10.2761 1.72384C10.5262 1.97389 10.6667 2.31302 10.6667 2.66665V3.99998" stroke="#900B09" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
+            svg_edit = """<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M3.33333 12.6667H4.28333L10.8 6.15L9.85 5.2L3.33333 11.7167V12.6667ZM2 14V11.1667L10.8 2.38333C10.9333 2.26111 11.0806 2.16667 11.2417 2.1C11.4028 2.03333 11.5722 2 11.75 2C11.9278 2 12.1 2.03333 12.2667 2.1C12.4333 2.16667 12.5778 2.26667 12.7 2.4L13.6167 3.33333C13.75 3.45556 13.8472 3.6 13.9083 3.76667C13.9694 3.93333 14 4.1 14 4.26667C14 4.44444 13.9694 4.61389 13.9083 4.775C13.8472 4.93611 13.75 5.08333 13.6167 5.21667L4.83333 14H2ZM10.3167 5.68333L9.85 5.2L10.8 6.15L10.3167 5.68333Z" fill="#1D1B20"/></svg>"""
+
+            btn_del = QPushButton()
+            btn_del.setIcon(create_svg_icon(svg_del, 16))
+            btn_del.setIconSize(QSize(16, 16))
+            btn_del.setFixedSize(24, 24)
+            btn_del.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:4px;}QPushButton:hover{background:rgba(144,11,9,0.08);}")
+            btn_del.clicked.connect(lambda _, tmpl=t: self.delete_template(tmpl))
+
+            btn_edit = QPushButton()
+            btn_edit.setIcon(create_svg_icon(svg_edit, 16))
+            btn_edit.setIconSize(QSize(16, 16))
+            btn_edit.setFixedSize(24, 24)
+            btn_edit.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:4px;}QPushButton:hover{background:rgba(0,0,0,0.06);}")
+            btn_edit.clicked.connect(lambda _, tmpl=t: self.show_edit_overlay(tmpl))
+
+            btn_col = QVBoxLayout()
+            btn_col.setContentsMargins(0, 0, 0, 0)
+            btn_col.setSpacing(10)
+            btn_col.addWidget(btn_del)
+            btn_col.addWidget(btn_edit)
+            outer.addLayout(btn_col)
+
+        elif not apenas_meus:
+            nome_criador = self.firebase.get_user_nome(t['usuario_id'])
+            criado_por = QLabel(f"Criado por: {nome_criador}")
+            criado_por.setStyleSheet("font-family:'Instrument Sans'; font-size:10px; font-weight:400; color:black; background:transparent; border:none;")
+            criado_por.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+            outer.addWidget(criado_por, alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+
         return card
 
     # ── lista de atalhos ──────────────────────────────────────────────────────
@@ -1561,7 +1763,78 @@ class MainMenu(QWidget):
         self.overlay_widget.add_content(bw)
         self.overlay_widget.show()
 
-    def create_template(self):
+    def show_edit_overlay(self, t):
+        self.overlay_widget = OverlayDialog(self)
+        self._editing_id = t['id']
+
+        title = QLabel("Editar template")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-family:'Inter'; font-size:16px; font-weight:bold; color:black; padding:0px 0px 15px 0px;")
+        self.overlay_widget.add_content(title)
+
+        def styled_input(ph):
+            w = QLineEdit(); w.setPlaceholderText(ph)
+            w.setStyleSheet("""
+                QLineEdit { padding:10px; border:2px solid #ddd; border-radius:8px; font-size:13px; background:white; color:black; }
+                QLineEdit:focus { border:2px solid #B97E88; }
+                QLineEdit::placeholder { color:#999; }
+            """)
+            return w
+
+        self.tpl_titulo = styled_input("Título do template")
+        self.tpl_titulo.setText(t['nome'])
+        self.tpl_atalho = styled_input("Atalho (opcional, ex: otb)")
+        self.tpl_atalho.setText(t.get('atalho', ''))
+        self.overlay_widget.add_content(self.tpl_titulo)
+        self.overlay_widget.add_content(self.tpl_atalho)
+
+        frame = QFrame()
+        frame.setStyleSheet("QFrame { border:2px solid #ddd; border-radius:8px; background:white; } QFrame:focus-within { border:2px solid #B97E88; }")
+        fl = QVBoxLayout(); fl.setContentsMargins(0,0,0,0)
+        self.tpl_conteudo = QTextEdit()
+        self.tpl_conteudo.setPlaceholderText("Conteúdo do template")
+        self.tpl_conteudo.setStyleSheet("QTextEdit { padding:8px; border:none; font-size:13px; background:transparent; color:black; }")
+        self.tpl_conteudo.setText(t['texto'])
+        palette = self.tpl_conteudo.palette()
+        palette.setColor(palette.ColorRole.PlaceholderText, QColor("#999"))
+        self.tpl_conteudo.setPalette(palette)
+        fl.addWidget(self.tpl_conteudo); frame.setLayout(fl)
+        self.overlay_widget.add_content(frame)
+        self._overlay_frame = frame
+
+        btns = QHBoxLayout(); btns.setSpacing(10); btns.addStretch()
+        b_salvar = QPushButton("Salvar"); b_salvar.setFixedWidth(90)
+        b_salvar.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:white;background:#82414C;border:none;border-radius:6px;padding:8px 16px;}QPushButton:hover{background:#6d3640;}")
+        b_salvar.clicked.connect(self.save_edit_template)
+        b_cancel = QPushButton("Cancelar"); b_cancel.setFixedWidth(90)
+        b_cancel.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:#82414C;background:transparent;border:2px solid #82414C;border-radius:6px;padding:8px 16px;}QPushButton:hover{background:rgba(130,65,76,0.1);}")
+        b_cancel.clicked.connect(self.overlay_widget.close)
+        btns.addWidget(b_salvar); btns.addWidget(b_cancel)
+        bw = QWidget(); bw.setLayout(btns)
+        self.overlay_widget.add_content(bw)
+        self.overlay_widget.show()
+
+    def save_edit_template(self):
+        titulo   = self.tpl_titulo.text().strip()
+        atalho   = self.tpl_atalho.text().strip()
+        conteudo = self.tpl_conteudo.toPlainText().strip()
+
+        if not titulo:
+            self.show_field_error(self.tpl_titulo, "Este campo é obrigatório")
+            return
+        if not conteudo:
+            self.show_field_error(self._overlay_frame, "Este campo é obrigatório")
+            self.tpl_conteudo.setFocus()
+            return
+
+        ok = self.firebase.update_template(self._editing_id, titulo, conteudo, atalho)
+        if ok:
+            self.overlay_widget.close()
+            self._notification = NotificationWidget('✓ Template atualizado!')
+            self._notification.show()
+            QTimer.singleShot(100, self.show_templates_tab)
+        else:
+            QMessageBox.critical(self, "Erro", "Falha ao salvar. Verifique sua conexão.")
         titulo   = self.tpl_titulo.text().strip()
         atalho   = self.tpl_atalho.text().strip()
         conteudo = self.tpl_conteudo.toPlainText().strip()
@@ -1580,8 +1853,9 @@ class MainMenu(QWidget):
         )
         if ok:
             self.overlay_widget.close()
-            NotificationWidget('✓ Template criado!').show()
-            self.show_templates_tab()
+            self._notification = NotificationWidget('✓ Template criado!')
+            self._notification.show()
+            QTimer.singleShot(100, self.show_templates_tab)
         else:
             QMessageBox.critical(self, "Erro", "Falha ao salvar no Firebase. Verifique sua conexão.")
 
@@ -1594,14 +1868,216 @@ class MainMenu(QWidget):
         self.add_window.show(); self.add_window.raise_(); self.add_window.activateWindow()
 
     def delete_template(self, t):
-        msg = QMessageBox(); msg.setWindowTitle('Confirmar'); msg.setText('Excluir este template?')
-        b_sim = msg.addButton('Sim', QMessageBox.ButtonRole.YesRole)
-        msg.addButton('Não', QMessageBox.ButtonRole.NoRole)
-        msg.exec()
-        if msg.clickedButton() == b_sim:
-            self.firebase.delete_template(t['id'])
-            NotificationWidget('✓ Template excluído!').show()
-            self.show_templates_tab()
+        show_confirm(self, 'Excluir este template?', lambda: self._do_delete_template(t))
+
+    def _do_delete_template(self, t):
+        self.firebase.delete_template(t['id'])
+        self._notification = NotificationWidget('✓ Template excluído!')
+        self._notification.show()
+        QTimer.singleShot(100, self.show_templates_tab)
+
+    def editar_nome(self):
+        overlay = OverlayDialog(self)
+        overlay.content_card.setFixedSize(320, 170)
+
+        title = QLabel("Editar nome")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:600; color:black; background:transparent; border:none; padding-bottom:10px;")
+        overlay.add_content(title)
+
+        inp = QLineEdit()
+        inp.setText(self.user_data.get('nome', ''))
+        inp.setStyleSheet("QLineEdit{padding:8px;border:2px solid #ddd;border-radius:8px;font-size:13px;background:white;color:black;}QLineEdit:focus{border:2px solid #B97E88;}")
+        overlay.add_content(inp)
+
+        overlay.card_layout.addStretch()
+
+        btns = QHBoxLayout(); btns.setSpacing(10)
+        b_cancelar = QPushButton("Cancelar")
+        b_cancelar.setFixedHeight(34)
+        b_cancelar.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:#2d2d2d;background:transparent;border:2px solid #ccc;border-radius:8px;}QPushButton:hover{background:rgba(0,0,0,0.05);}")
+        b_cancelar.clicked.connect(overlay.close)
+        b_salvar = QPushButton("Salvar")
+        b_salvar.setFixedHeight(34)
+        b_salvar.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:white;background:#82414C;border:none;border-radius:8px;}QPushButton:hover{background:#6d3640;}")
+        def _salvar_nome():
+            novo = inp.text().strip()
+            if not novo:
+                return
+            self.firebase._upsert_usuario(self.user_data['uid'], novo, self.user_data['setor'],
+                                           self.user_data['email'], aprovado=True,
+                                           is_admin=self.user_data.get('is_admin', False))
+            self.user_data['nome'] = novo
+            overlay.close()
+            self._notification = NotificationWidget('✓ Nome atualizado!')
+            self._notification.show()
+            self.show_config_tab()
+        b_salvar.clicked.connect(_salvar_nome)
+        btns.addWidget(b_cancelar); btns.addWidget(b_salvar)
+        bw = QWidget(); bw.setStyleSheet("background:transparent;border:none;"); bw.setLayout(btns)
+        overlay.add_content(bw)
+        overlay.show()
+        inp.setFocus()
+
+    def editar_setor(self):
+        overlay = OverlayDialog(self)
+        overlay.content_card.setFixedSize(320, 60 + len(SETORES) * 38 + 60)
+
+        title = QLabel("Editar setor")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:600; color:black; background:transparent; border:none; padding-bottom:6px;")
+        overlay.add_content(title)
+
+        atual = self.user_data.get('setor', '')
+        selecionado = [atual]
+
+        botoes = []
+        for s in SETORES:
+            btn = QPushButton(s)
+            ativo = s == atual
+            btn.setCheckable(True)
+            btn.setChecked(ativo)
+            btn.setFixedHeight(32)
+            estilo_ativo   = "QPushButton{font-family:'Inter';font-size:12px;color:white;background:#82414C;border:none;border-radius:8px;}"
+            estilo_inativo = "QPushButton{font-family:'Inter';font-size:12px;color:#2d2d2d;background:#f0f0f0;border:none;border-radius:8px;}QPushButton:hover{background:#e0e0e0;}"
+            btn.setStyleSheet(estilo_ativo if ativo else estilo_inativo)
+            def _on_click(checked, nome=s, b=btn):
+                selecionado[0] = nome
+                for ob in botoes:
+                    ob.setStyleSheet(estilo_ativo if ob.text() == nome else estilo_inativo)
+            btn.clicked.connect(_on_click)
+            botoes.append(btn)
+            overlay.add_content(btn)
+
+        overlay.card_layout.addStretch()
+
+        btns = QHBoxLayout(); btns.setSpacing(10)
+        b_cancelar = QPushButton("Cancelar")
+        b_cancelar.setFixedHeight(34)
+        b_cancelar.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:#2d2d2d;background:transparent;border:2px solid #ccc;border-radius:8px;}QPushButton:hover{background:rgba(0,0,0,0.05);}")
+        b_cancelar.clicked.connect(overlay.close)
+        b_salvar = QPushButton("Salvar")
+        b_salvar.setFixedHeight(34)
+        b_salvar.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:white;background:#82414C;border:none;border-radius:8px;}QPushButton:hover{background:#6d3640;}")
+        def _salvar_setor():
+            novo = selecionado[0]
+            self.firebase._upsert_usuario(self.user_data['uid'], self.user_data['nome'], novo,
+                                           self.user_data['email'], aprovado=True,
+                                           is_admin=self.user_data.get('is_admin', False))
+            self.user_data['setor'] = novo
+            overlay.close()
+            self._notification = NotificationWidget('✓ Setor atualizado!')
+            self._notification.show()
+            self.show_config_tab()
+        b_salvar.clicked.connect(_salvar_setor)
+        btns.addWidget(b_cancelar); btns.addWidget(b_salvar)
+        bw = QWidget(); bw.setStyleSheet("background:transparent;border:none;"); bw.setLayout(btns)
+        overlay.add_content(bw)
+        overlay.show()
+
+    def show_config_tab(self):
+        if MainMenu._last_tab != 'config':
+            self._tab_antes_config = MainMenu._last_tab
+        MainMenu._last_tab = 'config'
+
+        # limpar layout inteiro e reconstruir
+        while self.config_content_layout.count():
+            item = self.config_content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        svg_voltar = """<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_43_90)">
+<path d="M9.99996 6.66666L6.66663 10M6.66663 10L9.99996 13.3333M6.66663 10H13.3333M18.3333 10C18.3333 14.6024 14.6023 18.3333 9.99996 18.3333C5.39759 18.3333 1.66663 14.6024 1.66663 10C1.66663 5.39762 5.39759 1.66666 9.99996 1.66666C14.6023 1.66666 18.3333 5.39762 18.3333 10Z" stroke="#1E1E1E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</g><defs><clipPath id="clip0_43_90"><rect width="20" height="20" fill="white"/></clipPath></defs></svg>"""
+        btn_voltar = QPushButton()
+        btn_voltar.setIcon(create_svg_icon(svg_voltar, 20))
+        btn_voltar.setIconSize(QSize(20, 20))
+        btn_voltar.setFixedSize(32, 32)
+        btn_voltar.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:6px;}QPushButton:hover{background:rgba(0,0,0,0.06);}")
+        btn_voltar.clicked.connect(self.voltar_menu)
+        self.config_content_layout.addWidget(btn_voltar, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        svg_edit_cfg = """<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M3.33333 12.6667H4.28333L10.8 6.15L9.85 5.2L3.33333 11.7167V12.6667ZM2 14V11.1667L10.8 2.38333C10.9333 2.26111 11.0806 2.16667 11.2417 2.1C11.4028 2.03333 11.5722 2 11.75 2C11.9278 2 12.1 2.03333 12.2667 2.1C12.4333 2.16667 12.5778 2.26667 12.7 2.4L13.6167 3.33333C13.75 3.45556 13.8472 3.6 13.9083 3.76667C13.9694 3.93333 14 4.1 14 4.26667C14 4.44444 13.9694 4.61389 13.9083 4.775C13.8472 4.93611 13.75 5.08333 13.6167 5.21667L4.83333 14H2ZM10.3167 5.68333L9.85 5.2L10.8 6.15L10.3167 5.68333Z" fill="#1D1B20"/></svg>"""
+
+        def config_row(label_text, value_text, on_edit=None):
+            row = QHBoxLayout(); row.setContentsMargins(0, 2, 0, 2)
+            lbl = QLabel(); lbl.setText(f"{label_text}: <b>{value_text}</b>")
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setStyleSheet("font-family:'Inter'; font-size:12px; color:black; background:transparent; border:none;")
+            row.addWidget(lbl); row.addStretch()
+            btn = QPushButton()
+            btn.setIcon(create_svg_icon(svg_edit_cfg, 16))
+            btn.setIconSize(QSize(16, 16)); btn.setFixedSize(28, 28)
+            btn.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:4px;}QPushButton:hover{background:rgba(0,0,0,0.06);}")
+            if on_edit: btn.clicked.connect(on_edit)
+            row.addWidget(btn)
+            w = QWidget(); w.setStyleSheet("background:transparent;"); w.setLayout(row)
+            return w
+
+        lbl_usuario = QLabel("Usuário")
+        lbl_usuario.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:600; color:black; background:transparent; border:none;")
+        self.config_content_layout.addWidget(lbl_usuario)
+
+        linha = QFrame(); linha.setFrameShape(QFrame.Shape.HLine)
+        linha.setStyleSheet("color:#C0C0C0; background:#C0C0C0; border:none; max-height:1px;")
+        self.config_content_layout.addWidget(linha)
+
+        self.config_content_layout.addWidget(config_row("Nome",  self.user_data.get('nome', '—'),  self.editar_nome))
+        self.config_content_layout.addWidget(config_row("Setor", self.user_data.get('setor', '—'), self.editar_setor))
+        self.config_content_layout.addWidget(config_row("Email", self.user_data.get('email', '—'), None))
+        self.config_content_layout.addWidget(config_row("Senha", "*******", None))
+
+        self.config_content_layout.addStretch()
+        self.stack.setCurrentIndex(1)
+
+    def voltar_menu(self):
+        self.stack.setCurrentIndex(0)
+        MainMenu._last_tab = getattr(self, '_tab_antes_config', 'templates')
+        self._reload_current_tab()
+
+    def confirmar_sair(self):
+        show_confirm(self, 'Deseja fechar o programa?', QApplication.quit)
+
+    def toggle_search(self):
+        self._search_open = not self._search_open
+        self.search_container.setVisible(self._search_open)
+        self.btn_search.setVisible(not self._search_open)
+        if self._search_open:
+            self.search_input.setFocus()
+            self.search_input.clear()
+        else:
+            self.search_input.clear()
+            self._reload_current_tab()
+
+    def on_search_changed(self, text):
+        if not self._search_open:
+            return
+        tab = MainMenu._last_tab
+        sub = MainMenu._last_sub_tab_templates if tab == 'templates' else MainMenu._last_sub_tab_atalhos
+        apenas_meus = (sub == 'meus')
+        uid   = self.user_data['uid']
+        setor = self.user_data['setor']
+
+        if not text.strip():
+            self._reload_current_tab()
+            return
+
+        q = text.lower()
+        if tab == 'templates':
+            source = (self.firebase.get_templates_meus(uid) if apenas_meus
+                      else self.firebase.get_templates_setor(setor))
+            filtered = [t for t in source if q in t['nome'].lower() or q in t['texto'].lower()]
+            self._on_templates_loaded(filtered, apenas_meus)
+
+    def _reload_current_tab(self):
+        if MainMenu._last_tab == 'templates':
+            sub = MainMenu._last_sub_tab_templates
+            self._load_templates(apenas_meus=(sub == 'meus'))
+        else:
+            sub = MainMenu._last_sub_tab_atalhos
+            self._load_atalhos(apenas_meus=(sub == 'meus'))
 
     def show_field_error(self, widget, message):
         original_style = widget.styleSheet()
