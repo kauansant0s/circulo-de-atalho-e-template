@@ -194,9 +194,9 @@ class FirebaseAuth:
             return []
         users = []
         for doc in resp.json().get('documents', []):
-            uid = doc['name'].split('/')[-1]
+            doc_uid = doc['name'].split('/')[-1]
             u = self._fields_to_dict(doc.get('fields', {}))
-            u['uid'] = uid
+            u['uid'] = doc_uid  # sempre usa o ID do documento, nunca campo interno
             users.append(u)
         return users
 
@@ -213,12 +213,19 @@ class FirebaseAuth:
         return users
 
     def approve_user(self, uid, nome, setor, email):
-        self._upsert_usuario(uid, nome, setor, email, aprovado=True, is_admin=False)
+        requests.patch(self._base('usuarios', uid), headers=self._headers(), json={"fields": {
+            "nome": {"stringValue": nome}, "setor": {"stringValue": setor},
+            "email": {"stringValue": email}, "aprovado": {"booleanValue": True}, "is_admin": {"booleanValue": False},
+        }})
         requests.delete(self._base('pending_users', uid), headers=self._headers())
         return True
 
     def reject_user(self, uid):
         requests.delete(self._base('pending_users', uid), headers=self._headers())
+        return True
+
+    def delete_user(self, uid):
+        requests.delete(self._base('usuarios', uid), headers=self._headers())
         return True
 
     def promote_to_admin(self, uid):
@@ -1103,7 +1110,7 @@ class OverlayDialog(QWidget):
 
         self.content_card = QWidget()
         self.content_card.setFixedSize(410, 450)
-        self.content_card.setStyleSheet("QWidget { background-color:white; border-radius:15px; }")
+        self.content_card.setStyleSheet("QWidget { background-color:#DEDDD2; border-radius:15px; }")
 
         self.card_layout = QVBoxLayout()
         self.card_layout.setContentsMargins(20, 20, 20, 20)
@@ -1197,11 +1204,32 @@ def show_confirm(parent, message, on_confirm):
 # ---------------------------------------------------------------------------
 # MainMenu
 # ---------------------------------------------------------------------------
+class _ClickOutsideOverlay(QWidget):
+    """Overlay invisível que detecta cliques fora do menu alvo."""
+    def __init__(self, geometry, target):
+        super().__init__(None)
+        self._target = target
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setMouseTracking(True)
+
+    def paintEvent(self, event):
+        pass  # não desenha nada — completamente transparente
+
+    def mousePressEvent(self, event):
+        gpos = event.globalPosition().toPoint()
+        if self._target.geometry().contains(gpos):
+            event.ignore()
+            return
+        self._target.close()
+
+
 class MainMenu(QWidget):
     _last_tab             = 'templates'
     _last_sub_tab_templates = 'meus'
     _last_sub_tab_atalhos   = 'meus'
-    _templates_loaded = pyqtSignal(list, bool)
+    _templates_loaded  = pyqtSignal(list, bool)
+    _usuarios_loaded   = pyqtSignal(list)
 
     def __init__(self, firebase, user_data, parent=None):
         super().__init__(parent)
@@ -1210,17 +1238,11 @@ class MainMenu(QWidget):
         self.circle_parent = parent
         self.add_window  = None
         self._templates_loaded.connect(self._on_templates_loaded)
+        self._usuarios_loaded.connect(self._on_usuarios_loaded)
         self.init_ui()
+        self.init_ui_content()
 
     # ── fechamento ────────────────────────────────────────────────────────────
-    def closeEvent(self, event):
-        self._reset_circle()
-        event.accept()
-
-    def hideEvent(self, event):
-        self._reset_circle()
-        event.accept()
-
     def _reset_circle(self):
         if self.circle_parent:
             self.circle_parent.menu_open = False
@@ -1231,11 +1253,48 @@ class MainMenu(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Popup
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(450, 520)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._pynput_listener = None
+        def _start_listener():
+            import time; time.sleep(0.3)  # ignorar o clique que abriu
+            from pynput import mouse as _mouse
+            def _on_click(x, y, button, pressed):
+                if not pressed or button != _mouse.Button.left:
+                    return
+                if not self.isVisible():
+                    return False
+                from PyQt6.QtCore import QRect
+                geo = self.geometry()
+                if not geo.contains(int(x), int(y)):
+                    QTimer.singleShot(0, self.close)
+                    return False
+            self._pynput_listener = _mouse.Listener(on_click=_on_click)
+            self._pynput_listener.start()
+        import threading
+        threading.Thread(target=_start_listener, daemon=True).start()
+
+    def closeEvent(self, event):
+        if hasattr(self, '_pynput_listener') and self._pynput_listener:
+            self._pynput_listener.stop()
+            self._pynput_listener = None
+        if hasattr(self, '_bg_overlay') and self._bg_overlay:
+            self._bg_overlay.close()
+            self._bg_overlay = None
+        self._reset_circle()
+        event.accept()
+
+    def hideEvent(self, event):
+        self._reset_circle()
+        event.accept()
+
+    # ── init_ui ───────────────────────────────────────────────────────────────
+    def init_ui_content(self):
         container = QWidget()
         container.setStyleSheet("QWidget { background-color:#DEDDD2; border-radius:10px; }")
         cl = QVBoxLayout()
@@ -1430,9 +1489,25 @@ class MainMenu(QWidget):
         config_layout.setSpacing(10)
         self.config_content_layout = config_layout
 
+        self.config_scroll = QScrollArea()
+        self.config_scroll.setWidget(self.config_page)
+        self.config_scroll.setWidgetResizable(True)
+        self.config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.config_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.config_scroll.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.config_scroll.viewport().setStyleSheet("background:#DEDDD2; border-radius:10px;")
+        self.config_scroll.setStyleSheet("""
+            QScrollArea { border:none; background:#DEDDD2; border-radius:10px; }
+            QScrollBar:vertical { background:transparent; width:6px; margin:0; border-radius:3px; }
+            QScrollBar::handle:vertical { background:#c0c0c0; border-radius:3px; min-height:20px; }
+            QScrollBar::handle:vertical:hover { background:#a0a0a0; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+        """)
+
         self.stack = QStackedWidget()
-        self.stack.addWidget(container)       # índice 0 — menu principal
-        self.stack.addWidget(self.config_page) # índice 1 — configurações
+        self.stack.addWidget(container)        # índice 0 — menu principal
+        self.stack.addWidget(self.config_scroll) # índice 1 — configurações
 
         ml = QVBoxLayout(); ml.setContentsMargins(0,0,0,0); ml.setSpacing(0)
         ml.addWidget(self.stack)
@@ -1491,6 +1566,7 @@ class MainMenu(QWidget):
     # ── abas principais ───────────────────────────────────────────────────────
     def show_templates_tab(self):
         MainMenu._last_tab = 'templates'
+        self._current_tab = 'templates'
         self.firebase.set_config('last_tab', 'templates')
         self.update_tab_styles('templates')
         self.btn_meus.setText('Meus templates')
@@ -1501,6 +1577,7 @@ class MainMenu(QWidget):
 
     def show_atalhos_tab(self):
         MainMenu._last_tab = 'atalhos'
+        self._current_tab = 'atalhos'
         self.firebase.set_config('last_tab', 'atalhos')
         self.update_tab_styles('atalhos')
         self.btn_meus.setText('Meus atalhos')
@@ -1671,6 +1748,9 @@ class MainMenu(QWidget):
         card.setLayout(lay)
         return card
     def show_add_overlay(self):
+        if getattr(self, '_current_tab', MainMenu._last_tab) == 'atalhos':
+            self.show_add_atalho_overlay()
+            return
         self.overlay_widget = OverlayDialog(self)
 
         title = QLabel("Criação de template")
@@ -1681,7 +1761,7 @@ class MainMenu(QWidget):
         def styled_input(ph):
             w = QLineEdit(); w.setPlaceholderText(ph)
             w.setStyleSheet("""
-                QLineEdit { padding:10px; border:2px solid #ddd; border-radius:8px; font-size:13px; background:white; color:black; }
+                QLineEdit { padding:10px; border:2px solid #C2C0B6; border-radius:8px; font-size:13px; background:transparent; color:black; }
                 QLineEdit:focus { border:2px solid #B97E88; }
                 QLineEdit::placeholder { color:#999; }
             """)
@@ -1693,7 +1773,7 @@ class MainMenu(QWidget):
         self.overlay_widget.add_content(self.tpl_atalho)
 
         frame = QFrame()
-        frame.setStyleSheet("QFrame { border:2px solid #ddd; border-radius:8px; background:white; } QFrame:focus-within { border:2px solid #B97E88; }")
+        frame.setStyleSheet("QFrame { border:2px solid #C2C0B6; border-radius:8px; background:transparent; } QFrame:focus-within { border:2px solid #B97E88; }")
         fl = QVBoxLayout(); fl.setContentsMargins(0,0,0,0)
         self.tpl_conteudo = QTextEdit(); self.tpl_conteudo.setPlaceholderText("Conteúdo do template")
         self.tpl_conteudo.setStyleSheet("QTextEdit { padding:8px; border:none; font-size:13px; background:transparent; color:black; }")
@@ -1737,6 +1817,158 @@ class MainMenu(QWidget):
         else:
             QMessageBox.critical(self, "Erro", "Falha ao salvar no Firebase. Verifique sua conexão.")
 
+    def show_add_atalho_overlay(self):
+        self.overlay_widget = OverlayDialog(self)
+
+        title = QLabel("Criação de Atalho")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:bold; color:black; padding:0px 0px 15px 0px;")
+        self.overlay_widget.add_content(title)
+
+        self.atl_titulo = QLineEdit()
+        self.atl_titulo.setPlaceholderText("Título do atalho")
+        self.atl_titulo.setStyleSheet("""
+            QLineEdit { padding:10px; border:2px solid #C2C0B6; border-radius:8px; font-size:13px; background:transparent; color:black; }
+            QLineEdit:focus { border:2px solid #B97E88; }
+            QLineEdit::placeholder { color:#999; }
+        """)
+        self.overlay_widget.add_content(self.atl_titulo)
+
+        # dropdown "Escolha o tipo de comando"
+        svg_chevron_s = """<svg width="12" height="12" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M2.5 5L7 9.5L11.5 5" stroke="#1E1E1E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+        self._atl_tipo_expanded = False
+        self._atl_tipo_selecionado = None
+
+        tipo_row = QWidget()
+        tipo_row.setStyleSheet("background:transparent;")
+        tipo_row_layout = QHBoxLayout(tipo_row)
+        tipo_row_layout.setContentsMargins(0, 0, 0, 0); tipo_row_layout.setSpacing(4)
+        lbl_tipo = QLabel("Escolha o tipo de comando para ativar o atalho")
+        lbl_tipo.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:none;")
+        self._btn_tipo_chevron = QPushButton()
+        self._btn_tipo_chevron.setIcon(create_svg_icon(svg_chevron_s, 12))
+        self._btn_tipo_chevron.setIconSize(QSize(12, 12))
+        self._btn_tipo_chevron.setFixedSize(20, 20)
+        self._btn_tipo_chevron.setStyleSheet("QPushButton{background:transparent;border:none;}")
+        tipo_row_layout.addWidget(lbl_tipo)
+        tipo_row_layout.addWidget(self._btn_tipo_chevron)
+        tipo_row_layout.addStretch()
+
+        self._atl_tipo_container = QWidget()
+        self._atl_tipo_container.setStyleSheet("""
+            QWidget { background:#BAB9AD; border-radius:8px; }
+        """)
+        self._atl_tipo_container.setVisible(False)
+        atl_tipo_layout = QVBoxLayout(self._atl_tipo_container)
+        atl_tipo_layout.setContentsMargins(8, 6, 8, 6); atl_tipo_layout.setSpacing(2)
+
+        # container que aparece após selecionar o tipo
+        self._atl_tipo_conteudo = QWidget()
+        self._atl_tipo_conteudo.setStyleSheet("background:transparent;")
+        self._atl_tipo_conteudo.setVisible(False)
+        self._atl_tipo_conteudo_layout = QVBoxLayout(self._atl_tipo_conteudo)
+        self._atl_tipo_conteudo_layout.setContentsMargins(0, 4, 0, 0)
+        self._atl_tipo_conteudo_layout.setSpacing(6)
+
+        for opcao in ["Alt + tecla", "Atalho como dos templates"]:
+            btn_opcao = QPushButton(opcao)
+            btn_opcao.setStyleSheet("""
+                QPushButton { font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent;
+                              border:none; text-align:left; padding:5px 6px; border-radius:4px; }
+                QPushButton:hover { background:rgba(0,0,0,0.08); }
+            """)
+            btn_opcao.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            def _on_opcao(checked=False, op=opcao):
+                self._atl_tipo_selecionado = op
+                _toggle_tipo()  # fechar dropdown
+                # limpar conteúdo anterior
+                while self._atl_tipo_conteudo_layout.count():
+                    item = self._atl_tipo_conteudo_layout.takeAt(0)
+                    if item.widget(): item.widget().deleteLater()
+                if op == "Alt + tecla":
+                    row = QHBoxLayout(); row.setSpacing(6); row.setContentsMargins(0,0,0,0)
+                    lbl_cmd = QLabel("Comando:")
+                    lbl_cmd.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:none;")
+                    lbl_alt = QLabel("Alt")
+                    lbl_alt.setFixedHeight(36)
+                    lbl_alt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lbl_alt.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:2px solid #C2C0B6; border-radius:8px; padding:0 10px;")
+                    lbl_plus = QLabel("+")
+                    lbl_plus.setStyleSheet("font-family:'Inter'; font-size:13px; color:#1D1B20; background:transparent; border:none;")
+                    self.atl_teclas = QLineEdit()
+                    self.atl_teclas.setPlaceholderText("Uma ou duas teclas, separadas por vírgula")
+                    self.atl_teclas.setStyleSheet("""
+                        QLineEdit { padding:8px 10px; border:2px solid #C2C0B6; border-radius:8px; font-size:12px; background:transparent; color:black; }
+                        QLineEdit:focus { border:2px solid #B97E88; }
+                    """)
+                    row.addWidget(lbl_cmd)
+                    row.addWidget(lbl_alt)
+                    row.addWidget(lbl_plus)
+                    row.addWidget(self.atl_teclas, stretch=1)
+                    rw = QWidget(); rw.setStyleSheet("background:transparent;"); rw.setLayout(row)
+                    self._atl_tipo_conteudo_layout.addWidget(rw)
+                else:
+                    row = QHBoxLayout(); row.setSpacing(6); row.setContentsMargins(0,0,0,0)
+                    lbl_cmd = QLabel("Comando:")
+                    lbl_cmd.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:none;")
+                    self.atl_shortcut = QLineEdit()
+                    self.atl_shortcut.setPlaceholderText("Ex: itb, gp...")
+                    self.atl_shortcut.setStyleSheet("""
+                        QLineEdit { padding:8px 10px; border:2px solid #C2C0B6; border-radius:8px; font-size:12px; background:transparent; color:black; }
+                        QLineEdit:focus { border:2px solid #B97E88; }
+                    """)
+                    row.addWidget(lbl_cmd)
+                    row.addWidget(self.atl_shortcut, stretch=1)
+                    rw = QWidget(); rw.setStyleSheet("background:transparent;"); rw.setLayout(row)
+                    self._atl_tipo_conteudo_layout.addWidget(rw)
+                self._atl_tipo_conteudo.setVisible(True)
+
+            btn_opcao.clicked.connect(_on_opcao)
+            atl_tipo_layout.addWidget(btn_opcao)
+
+        def _toggle_tipo():
+            self._atl_tipo_expanded = not self._atl_tipo_expanded
+            from PyQt6.QtGui import QTransform, QIcon
+            px = create_svg_icon(svg_chevron_s, 12).pixmap(12, 12)
+            t = QTransform().rotate(180 if self._atl_tipo_expanded else 0)
+            self._btn_tipo_chevron.setIcon(QIcon(px.transformed(t)))
+            self._atl_tipo_container.setVisible(self._atl_tipo_expanded)
+
+        tipo_row.mousePressEvent = lambda e: _toggle_tipo()
+        tipo_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_tipo_chevron.clicked.connect(_toggle_tipo)
+
+        self.overlay_widget.add_content(tipo_row)
+        self.overlay_widget.add_content(self._atl_tipo_container)
+        self.overlay_widget.add_content(self._atl_tipo_conteudo)
+
+        # campo de ações
+        acoes_frame = QFrame()
+        acoes_frame.setStyleSheet("QFrame { border:2px solid #C2C0B6; border-radius:8px; background:transparent; }")
+        acoes_frame.setMinimumHeight(200)
+        acoes_layout = QVBoxLayout(acoes_frame)
+        acoes_layout.setContentsMargins(8, 8, 8, 8); acoes_layout.setSpacing(6)
+        btn_add_acao = QPushButton("+ Adicionar ação")
+        btn_add_acao.setStyleSheet("""
+            QPushButton { font-family:'Inter'; font-size:12px; color:#555; background:transparent;
+                          border:1px dashed #C2C0B6; border-radius:6px; padding:4px 8px; }
+            QPushButton:hover { background:rgba(0,0,0,0.05); }
+        """)
+        btn_add_acao.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add_acao.setSizePolicy(btn_add_acao.sizePolicy().horizontalPolicy(), btn_add_acao.sizePolicy().verticalPolicy())
+        btn_add_acao.setFixedWidth(130)
+        top_row = QHBoxLayout(); top_row.setContentsMargins(0,0,0,0)
+        top_row.addWidget(btn_add_acao); top_row.addStretch()
+        top_w = QWidget(); top_w.setStyleSheet("background:transparent;"); top_w.setLayout(top_row)
+        acoes_layout.addWidget(top_w)
+        acoes_layout.addStretch()
+        self.overlay_widget.add_content(acoes_frame)
+
+        self.overlay_widget.show()
+
     def show_edit_overlay(self, t):
         self.overlay_widget = OverlayDialog(self)
         self._editing_id = t['id']
@@ -1749,7 +1981,7 @@ class MainMenu(QWidget):
         def styled_input(ph):
             w = QLineEdit(); w.setPlaceholderText(ph)
             w.setStyleSheet("""
-                QLineEdit { padding:10px; border:2px solid #ddd; border-radius:8px; font-size:13px; background:white; color:black; }
+                QLineEdit { padding:10px; border:2px solid #C2C0B6; border-radius:8px; font-size:13px; background:transparent; color:black; }
                 QLineEdit:focus { border:2px solid #B97E88; }
                 QLineEdit::placeholder { color:#999; }
             """)
@@ -1763,7 +1995,7 @@ class MainMenu(QWidget):
         self.overlay_widget.add_content(self.tpl_atalho)
 
         frame = QFrame()
-        frame.setStyleSheet("QFrame { border:2px solid #ddd; border-radius:8px; background:white; } QFrame:focus-within { border:2px solid #B97E88; }")
+        frame.setStyleSheet("QFrame { border:2px solid #C2C0B6; border-radius:8px; background:transparent; } QFrame:focus-within { border:2px solid #B97E88; }")
         fl = QVBoxLayout(); fl.setContentsMargins(0,0,0,0)
         self.tpl_conteudo = QTextEdit()
         self.tpl_conteudo.setPlaceholderText("Conteúdo do template")
@@ -2003,6 +2235,13 @@ class MainMenu(QWidget):
         self.config_content_layout.addWidget(config_row("Email", self.user_data.get('email', '—'), None))
         self.config_content_layout.addWidget(config_row("Senha", "*******", None))
 
+        btn_logout = QPushButton("Log out")
+        btn_logout.setStyleSheet("QPushButton{font-family:'Inter';font-size:11px;color:#900B09;background:transparent;border:none;text-decoration:underline;padding:0;}QPushButton:hover{color:#6a0807;}")
+        btn_logout.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_logout.setFixedHeight(20)
+        btn_logout.clicked.connect(self.do_logout)
+        self.config_content_layout.addWidget(btn_logout, alignment=Qt.AlignmentFlag.AlignLeft)
+
         # ── Seção: Animações ──────────────────────────────────────────────────
         linha_a = QFrame(); linha_a.setFrameShape(QFrame.Shape.HLine)
         linha_a.setStyleSheet("color:#C0C0C0; background:#C0C0C0; border:none; max-height:1px;")
@@ -2049,8 +2288,309 @@ class MainMenu(QWidget):
         anim_w = QWidget(); anim_w.setStyleSheet("background:transparent;"); anim_w.setLayout(anim_row)
         self.config_content_layout.addWidget(anim_w)
 
+        # ── Seção: Administração de usuários (só para admins) ─────────────────
+        if self.user_data.get('is_admin', False):
+            linha_adm = QFrame(); linha_adm.setFrameShape(QFrame.Shape.HLine)
+            linha_adm.setStyleSheet("color:#C0C0C0; background:#C0C0C0; border:none; max-height:1px;")
+            self.config_content_layout.addWidget(linha_adm)
+
+            lbl_adm = QLabel("Administração de usuários")
+            lbl_adm.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:600; color:black; background:transparent; border:none;")
+            self.config_content_layout.addWidget(lbl_adm)
+
+            # subtítulo "Ver usuários" com seta que gira
+            svg_chevron = """<svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M2.5 5L7 9.5L11.5 5" stroke="#1E1E1E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+
+            self._chevron_rotated = False
+            self._usuarios_container = QWidget()
+            self._usuarios_container.setVisible(False)
+            self._usuarios_container.setStyleSheet("background:transparent;")
+            uc_layout = QVBoxLayout(self._usuarios_container)
+            uc_layout.setContentsMargins(8, 0, 8, 4)
+            uc_layout.setSpacing(2)
+
+            svg_del_u = """<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M2 3.99998H3.33333M3.33333 3.99998H14M3.33333 3.99998L3.33333 13.3333C3.33333 13.6869 3.47381 14.0261 3.72386 14.2761C3.97391 14.5262 4.31304 14.6666 4.66667 14.6666H11.3333C11.687 14.6666 12.0261 14.5262 12.2761 14.2761C12.5262 14.0261 12.6667 13.6869 12.6667 13.3333V3.99998M5.33333 3.99998V2.66665C5.33333 2.31302 5.47381 1.97389 5.72386 1.72384C5.97391 1.47379 6.31304 1.33331 6.66667 1.33331H9.33333C9.68696 1.33331 10.0261 1.47379 10.2761 1.72384C10.5262 1.97389 10.6667 2.31302 10.6667 2.66665V3.99998" stroke="#900B09" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
+
+            _uc_layout_ref     = uc_layout
+            _uc_container_ref  = self._usuarios_container
+            self._svg_del_u    = svg_del_u
+            self._uc_layout_ref    = _uc_layout_ref
+            self._uc_container_ref = _uc_container_ref
+
+            def _popular_usuarios():
+                try:
+                    todos = self.firebase.get_approved_users()
+                except Exception as e:
+                    print(f"[DEBUG usuarios] erro={e}")
+                    todos = []
+                self._usuarios_loaded.emit(todos)
+
+            import threading as _threading
+            _threading.Thread(target=_popular_usuarios, daemon=True).start()
+
+            self._btn_chevron = QPushButton()
+            self._btn_chevron.setIcon(create_svg_icon(svg_chevron, 14))
+            self._btn_chevron.setIconSize(QSize(14, 14))
+            self._btn_chevron.setFixedSize(22, 22)
+            self._btn_chevron.setStyleSheet("QPushButton{background:transparent;border:none;}")
+
+            def _toggle_usuarios():
+                self._chevron_rotated = not self._chevron_rotated
+                from PyQt6.QtGui import QTransform, QIcon
+                px = create_svg_icon(svg_chevron, 14).pixmap(14, 14)
+                t = QTransform().rotate(180 if self._chevron_rotated else 0)
+                self._btn_chevron.setIcon(QIcon(px.transformed(t)))
+                self._usuarios_container.setVisible(self._chevron_rotated)
+
+            self._btn_chevron.clicked.connect(_toggle_usuarios)
+
+            ver_w = QWidget()
+            ver_w.setStyleSheet("QWidget{background:transparent;} QWidget:hover{background:rgba(0,0,0,0.04); border-radius:6px;}")
+            ver_w.setCursor(Qt.CursorShape.PointingHandCursor)
+            ver_w.mousePressEvent = lambda e: _toggle_usuarios()
+            ver_row = QHBoxLayout(ver_w)
+            ver_row.setContentsMargins(0, 4, 0, 4); ver_row.setSpacing(6)
+            lbl_ver = QLabel("Ver usuários")
+            lbl_ver.setStyleSheet("font-family:'Inter'; font-size:12px; color:black; background:transparent; border:none;")
+            ver_row.addWidget(lbl_ver)
+            ver_row.addWidget(self._btn_chevron)
+            ver_row.addStretch()
+
+            self.config_content_layout.addWidget(ver_w)
+            self.config_content_layout.addWidget(self._usuarios_container)
+
+            # ── Usuários pendentes ────────────────────────────────────────────
+            import threading
+            pendentes_ref = [0]
+
+            pend_w = QWidget()
+            pend_w.setStyleSheet("QWidget{background:transparent;}")
+            pend_row = QHBoxLayout(pend_w)
+            pend_row.setContentsMargins(0, 4, 0, 4); pend_row.setSpacing(6)
+
+            lbl_pend = QLabel("Usuários pendentes")
+            lbl_pend.setStyleSheet("font-family:'Inter'; font-size:12px; color:black; background:transparent; border:none;")
+            pend_row.addWidget(lbl_pend)
+
+            bolinha = QLabel()
+            bolinha.setFixedSize(10, 10)
+            bolinha.setStyleSheet("background:#FF7C7C; border-radius:5px; border:none;")
+            bolinha.setVisible(False)
+            pend_row.addWidget(bolinha)
+            pend_row.addStretch()
+
+            # tooltip customizado (Tool window suprime tooltips nativos)
+            self._pend_tooltip = QLabel("Nenhum usuário pendente de aprovação", self)
+            self._pend_tooltip.setStyleSheet("""
+                background:#333; color:white; border-radius:4px;
+                padding:4px 8px; font-family:'Inter'; font-size:11px; border:none;
+            """)
+            self._pend_tooltip.setVisible(False)
+            self._pend_tooltip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+            def _do_show_tooltip():
+                if pendentes_ref[0] != 0:
+                    return
+                pos = pend_w.mapTo(self, pend_w.rect().bottomLeft())
+                self._pend_tooltip.move(pos.x(), pos.y() + 2)
+                self._pend_tooltip.adjustSize()
+                self._pend_tooltip.raise_()
+                self._pend_tooltip.setVisible(True)
+
+            def _show_tooltip():
+                if pendentes_ref[0] == 0:
+                    self._tooltip_timer = QTimer()
+                    self._tooltip_timer.setSingleShot(True)
+                    self._tooltip_timer.timeout.connect(_do_show_tooltip)
+                    self._tooltip_timer.start(500)
+
+            def _hide_tooltip():
+                if hasattr(self, '_tooltip_timer'):
+                    self._tooltip_timer.stop()
+                self._pend_tooltip.setVisible(False)
+
+            pend_w.enterEvent = lambda e: _show_tooltip()
+            pend_w.leaveEvent = lambda e: _hide_tooltip()
+
+            self._pend_container = QWidget()
+            self._pend_container.setVisible(False)
+            self._pend_container.setStyleSheet("background:transparent;")
+            pc_layout = QVBoxLayout(self._pend_container)
+            pc_layout.setContentsMargins(8, 4, 0, 4); pc_layout.setSpacing(4)
+
+            def _toggle_pend():
+                if pendentes_ref[0] == 0:
+                    return
+                vis = not self._pend_container.isVisible()
+                self._pend_container.setVisible(vis)
+
+            pend_w.setCursor(Qt.CursorShape.ArrowCursor)
+
+            def _atualizar_pendentes(lista):
+                pendentes_ref[0] = len(lista)
+                bolinha.setVisible(len(lista) > 0)
+
+                # limpar container
+                while pc_layout.count():
+                    item = pc_layout.takeAt(0)
+                    if item.widget(): item.widget().deleteLater()
+
+                # popular com os pendentes
+                for u in lista:
+                    _uid   = str(u.get('uid', ''))
+                    _nome  = u.get('nome', '?')
+                    _setor = u.get('setor', '')
+                    _email = u.get('email', '')
+
+                    row = QHBoxLayout(); row.setContentsMargins(16, 2, 0, 2); row.setSpacing(6)
+                    lbl_nome = QLabel(_nome)
+                    lbl_nome.setStyleSheet("font-family:'Inter'; font-size:12px; color:black; background:transparent; border:none;")
+                    row.addWidget(lbl_nome); row.addStretch()
+
+                    btn_apr = QPushButton("Aprovar")
+                    btn_apr.setStyleSheet("QPushButton{font-family:'Inter';font-size:12px;color:#2d8a2d;background:transparent;border:none;text-decoration:underline;}QPushButton:hover{color:#1a5c1a;}")
+                    btn_apr.setCursor(Qt.CursorShape.PointingHandCursor)
+
+                    btn_rec = QPushButton("Recusar")
+                    btn_rec.setStyleSheet("QPushButton{font-family:'Inter';font-size:12px;color:#900B09;background:transparent;border:none;text-decoration:underline;}QPushButton:hover{color:#6a0807;}")
+                    btn_rec.setCursor(Qt.CursorShape.PointingHandCursor)
+
+                    def _aprovar(checked=False, uid=_uid, nome=_nome, setor=_setor, email=_email):
+                        self.firebase.approve_user(uid, nome, setor, email)
+                        self._notification = NotificationWidget(f'✓ {nome} aprovado!')
+                        self._notification.show()
+                        self.show_config_tab()
+
+                    def _recusar(checked=False, uid=_uid, nome=_nome):
+                        show_confirm(self, f'Recusar {nome}?', lambda uid=uid, nome=nome: _do_recusar(uid, nome))
+
+                    def _do_recusar(uid, nome):
+                        self.firebase.reject_user(uid)
+                        self._notification = NotificationWidget(f'✗ {nome} recusado!')
+                        self._notification.show()
+                        self.show_config_tab()
+
+                    btn_apr.clicked.connect(_aprovar)
+                    btn_rec.clicked.connect(_recusar)
+                    row.addWidget(btn_apr); row.addWidget(btn_rec)
+
+                    rw = QWidget(); rw.setStyleSheet("background:transparent;"); rw.setLayout(row)
+                    pc_layout.addWidget(rw)
+
+                if len(lista) > 0:
+                    pend_w.setCursor(Qt.CursorShape.PointingHandCursor)
+                    pend_w.setToolTip("")
+                    pend_w.mousePressEvent = lambda e: _toggle_pend()
+                else:
+                    pend_w.setCursor(Qt.CursorShape.ArrowCursor)
+                    pend_w.setToolTip("Nenhum usuário pendente de aprovação")
+                    pend_w.mousePressEvent = lambda e: None
+
+            # buscar pendentes em thread para não bloquear UI
+            self.config_content_layout.addWidget(pend_w)
+            self.config_content_layout.addWidget(self._pend_container)
+
+            def _buscar_pendentes():
+                try:
+                    lista = self.firebase.get_pending_users()
+                except:
+                    lista = []
+                QTimer.singleShot(0, lambda: _atualizar_pendentes(lista))
+
+            import threading as _threading
+            _threading.Thread(target=_buscar_pendentes, daemon=True).start()
+
         self.config_content_layout.addStretch()
         self.stack.setCurrentIndex(1)
+
+    def _on_usuarios_loaded(self, todos):
+        lay = getattr(self, '_uc_layout_ref', None)
+        container = getattr(self, '_uc_container_ref', None)
+        if lay is None or container is None:
+            return
+
+        while lay.count():
+            item = lay.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
+        meu_uid = self.user_data.get('uid', '')
+        outros = [u for u in todos if str(u.get('uid','')) != meu_uid]
+
+        if not outros:
+            vazio = QLabel("Nenhum outro usuário cadastrado.")
+            vazio.setStyleSheet("font-family:'Inter'; font-size:11px; color:#888; background:transparent; border:none; padding-left:8px;")
+            lay.addWidget(vazio)
+        else:
+            for u in outros:
+                _uid      = str(u.get('uid', ''))
+                _nome     = u.get('nome', '?')
+                _setor    = u.get('setor', '')
+                _is_admin = u.get('is_admin', False)
+                row = QHBoxLayout(); row.setContentsMargins(0, 5, 0, 5); row.setSpacing(6)
+                lbl = QLabel(f"{_nome} - {_setor}")
+                lbl.setStyleSheet("font-family:'Inter'; font-size:12px; color:black; background:transparent; border:none;")
+                row.addWidget(lbl); row.addStretch()
+                btn_admin = QPushButton("Tornar admin")
+                btn_admin.setStyleSheet("QPushButton{font-family:'Inter';font-size:12px;color:#1D1B20;background:transparent;border:none;text-decoration:underline;}QPushButton:hover{color:#444;}")
+                btn_admin.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_admin.setVisible(not _is_admin)
+                btn_del_u = QPushButton()
+                btn_del_u.setIcon(create_svg_icon(getattr(self, '_svg_del_u', ''), 16))
+                btn_del_u.setIconSize(QSize(16, 16))
+                btn_del_u.setFixedSize(25, 25)
+                btn_del_u.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:4px;padding:0;}QPushButton:hover{background:rgba(144,11,9,0.08);}")
+                def _tornar_admin(checked=False, uid=_uid, nome=_nome):
+                    show_confirm(self, f'Tornar {nome} administrador?', lambda uid=uid, nome=nome: self._do_admin(uid, nome))
+                def _excluir_user(checked=False, uid=_uid, nome=_nome):
+                    show_confirm(self, f'Excluir {nome}?', lambda uid=uid, nome=nome: self._do_excluir_user(uid, nome))
+                btn_admin.clicked.connect(_tornar_admin)
+                btn_del_u.clicked.connect(_excluir_user)
+                row.addWidget(btn_admin); row.addWidget(btn_del_u)
+                rw = QWidget(); rw.setStyleSheet("background:transparent;"); rw.setLayout(row)
+                lay.addWidget(rw)
+
+        container.adjustSize()
+        container.updateGeometry()
+        if container.isVisible():
+            container.hide(); container.show()
+        # forçar scroll a recalcular
+        if hasattr(self, 'scroll_area'):
+            self.scroll_area.widget().adjustSize()
+
+    def _do_admin(self, uid, nome):
+        self.firebase.promote_to_admin(uid)
+        self._notification = NotificationWidget(f'✓ {nome} é admin agora!')
+        self._notification.show()
+        self.show_config_tab()
+
+    def _do_excluir_user(self, uid, nome):
+        self.firebase.delete_user(uid)
+        self._notification = NotificationWidget(f'✗ {nome} excluído!')
+        self._notification.show()
+        self.show_config_tab()
+
+    def do_logout(self):
+        self.firebase.logout()
+        self.close()
+        if self.circle_parent:
+            self.circle_parent.close()
+        from PyQt6.QtWidgets import QApplication
+        for w in QApplication.topLevelWidgets():
+            w.close()
+        # reinicia a janela de login
+        login = LoginWindow(self.firebase)
+        login.login_success.connect(lambda user_data: self._on_relogin(user_data, login))
+        login.show()
+        self._login_ref = login
+
+    def _on_relogin(self, user_data, login):
+        login.close()
+        new_circle = FloatingCircle(self.firebase, user_data)
+        new_circle.show()
+        new_circle.raise_()
 
     def voltar_menu(self):
         self.stack.setCurrentIndex(0)
@@ -2141,6 +2681,7 @@ class EditTemplateWindow(QWidget):
     def init_ui(self, nome, texto, atalho):
         self.setWindowTitle('Editar Template')
         self.setFixedSize(500, 400)
+        self.setStyleSheet("QWidget { background-color:#DEDDD2; }")
         lay = QVBoxLayout()
 
         lay.addWidget(QLabel('Nome do template:'))
