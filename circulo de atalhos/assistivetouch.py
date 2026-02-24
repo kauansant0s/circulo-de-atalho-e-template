@@ -1042,31 +1042,8 @@ class FloatingCircle(QWidget):
 
     def show_menu(self):
         if self.menu and self.menu.isVisible():
-            # fechar menu com animação
-            try:
-                cp = QPoint(self.x(), self.y())
-                self.menu_close_slide = QPropertyAnimation(self.menu, b"pos")
-                self.menu_close_slide.setDuration(200)
-                self.menu_close_slide.setStartValue(self.menu.pos())
-                self.menu_close_slide.setEndValue(cp)
-                self.menu_close_slide.setEasingCurve(QEasingCurve.Type.InCubic)
-
-                self.menu_close_fade = QPropertyAnimation(self.menu, b"windowOpacity")
-                self.menu_close_fade.setDuration(200)
-                self.menu_close_fade.setStartValue(1.0)
-                self.menu_close_fade.setEndValue(0.0)
-
-                def on_close_done():
-                    if self.menu: self.menu.close(); self.menu = None
-                    self.menu_open = False
-
-                self.menu_close_fade.finished.connect(on_close_done)
-                self.menu_close_slide.start()
-                self.menu_close_fade.start()
-            except:
-                if self.menu: self.menu.close(); self.menu = None
-                self.menu_open = False
-
+            if self.menu: self.menu.close(); self.menu = None
+            self.menu_open = False
             self._animate_circle(0.85, 0.6)
             return
 
@@ -1081,34 +1058,10 @@ class FloatingCircle(QWidget):
 
         mx = self.x() - 450
         my = self.y()
-        cp = QPoint(self.x(), self.y())
-        fp = QPoint(mx, my)
-
-        try:
-            self.menu.move(cp)
-            self.menu.setWindowOpacity(0.0)
-            self.menu.show()
-            self.menu.raise_()
-
-            self.menu_slide = QPropertyAnimation(self.menu, b"pos")
-            self.menu_slide.setDuration(250)
-            self.menu_slide.setStartValue(cp)
-            self.menu_slide.setEndValue(fp)
-            self.menu_slide.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-            self.menu_fade = QPropertyAnimation(self.menu, b"windowOpacity")
-            self.menu_fade.setDuration(250)
-            self.menu_fade.setStartValue(0.0)
-            self.menu_fade.setEndValue(1.0)
-
-            self.menu_slide.start()
-            self.menu_fade.start()
-        except:
-            self.menu.move(mx, my)
-            self.menu.setWindowOpacity(1.0)
-            self.menu.show()
-            self.menu.raise_()
-
+        self.menu.move(mx, my)
+        self.menu.setWindowOpacity(1.0)
+        self.menu.show()
+        self.menu.raise_()
         self._animate_circle(1.0, 1.0)
 
     def enterEvent(self, event):
@@ -1763,6 +1716,27 @@ class MainMenu(QWidget):
         self.overlay_widget.add_content(bw)
         self.overlay_widget.show()
 
+    def create_template(self):
+        titulo   = self.tpl_titulo.text().strip()
+        atalho   = self.tpl_atalho.text().strip()
+        conteudo = self.tpl_conteudo.toPlainText().strip()
+        if not titulo:
+            self.show_field_error(self.tpl_titulo, "Este campo é obrigatório")
+            return
+        if not conteudo:
+            self.show_field_error(self._overlay_frame, "Este campo é obrigatório")
+            self.tpl_conteudo.setFocus()
+            return
+        ok = self.firebase.add_template(titulo, conteudo, atalho,
+                                         self.user_data['uid'], self.user_data['setor'])
+        if ok:
+            self.overlay_widget.close()
+            self._notification = NotificationWidget('✓ Template criado!')
+            self._notification.show()
+            QTimer.singleShot(100, self.show_templates_tab)
+        else:
+            QMessageBox.critical(self, "Erro", "Falha ao salvar no Firebase. Verifique sua conexão.")
+
     def show_edit_overlay(self, t):
         self.overlay_widget = OverlayDialog(self)
         self._editing_id = t['id']
@@ -2028,6 +2002,52 @@ class MainMenu(QWidget):
         self.config_content_layout.addWidget(config_row("Setor", self.user_data.get('setor', '—'), self.editar_setor))
         self.config_content_layout.addWidget(config_row("Email", self.user_data.get('email', '—'), None))
         self.config_content_layout.addWidget(config_row("Senha", "*******", None))
+
+        # ── Seção: Animações ──────────────────────────────────────────────────
+        linha_a = QFrame(); linha_a.setFrameShape(QFrame.Shape.HLine)
+        linha_a.setStyleSheet("color:#C0C0C0; background:#C0C0C0; border:none; max-height:1px;")
+        self.config_content_layout.addWidget(linha_a)
+
+        anim_row = QHBoxLayout(); anim_row.setContentsMargins(0, 4, 0, 4)
+        lbl_anim = QLabel("Animações")
+        lbl_anim.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:600; color:black; background:transparent; border:none;")
+        anim_row.addWidget(lbl_anim); anim_row.addStretch()
+
+        anim_on = self.firebase.get_config('animacoes', True)
+        if isinstance(anim_on, str): anim_on = anim_on.lower() != 'false'
+
+        class ToggleSwitch(QWidget):
+            def __init__(self, checked=True):
+                super().__init__()
+                self._checked = checked
+                self.setFixedSize(44, 24)
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            def isChecked(self): return self._checked
+            def setChecked(self, v): self._checked = v; self.update()
+            def mousePressEvent(self, e):
+                self._checked = not self._checked
+                self.update()
+                _on_toggle(self._checked)
+            def paintEvent(self, e):
+                from PyQt6.QtGui import QPainter, QColor, QPainterPath
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                bg = QColor("#88C22B") if self._checked else QColor("#C0C0C0")
+                p.setBrush(bg); p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(0, 0, 44, 24, 12, 12)
+                p.setBrush(QColor("white")); p.setPen(Qt.PenStyle.NoPen)
+                cx = 24 if self._checked else 4
+                p.drawEllipse(cx, 3, 18, 18)
+
+        toggle = ToggleSwitch(anim_on)
+
+        def _on_toggle(checked):
+            self.firebase.set_config('animacoes', checked)
+
+        anim_row.addWidget(toggle)
+
+        anim_w = QWidget(); anim_w.setStyleSheet("background:transparent;"); anim_w.setLayout(anim_row)
+        self.config_content_layout.addWidget(anim_w)
 
         self.config_content_layout.addStretch()
         self.stack.setCurrentIndex(1)
