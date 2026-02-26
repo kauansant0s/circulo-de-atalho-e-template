@@ -267,9 +267,27 @@ class FirebaseAuth:
             "setor":          {"stringValue": setor},
         }}
         resp = requests.post(self._base('atalhos'), headers=self._headers(), json=data)
-        print(f"[add_atalho] status={resp.status_code} body={resp.text[:300]}")
         if resp.status_code == 200:
             self._invalidate_cache()
+        return resp.status_code == 200
+
+    def delete_atalho(self, doc_id):
+        resp = requests.delete(self._base('atalhos', doc_id), headers=self._headers())
+        if resp.status_code == 200:
+            self._cache_shortcuts.clear()
+        return resp.status_code == 200
+
+    def update_atalho(self, doc_id, titulo, comando_tipo, comando_valor, acoes):
+        data = {"fields": {
+            "titulo":        {"stringValue": titulo},
+            "comando_tipo":  {"stringValue": comando_tipo},
+            "comando_valor": {"stringValue": comando_valor},
+            "acoes":         {"stringValue": json.dumps(acoes)},
+        }}
+        mask = "updateMask.fieldPaths=titulo&updateMask.fieldPaths=comando_tipo&updateMask.fieldPaths=comando_valor&updateMask.fieldPaths=acoes"
+        resp = requests.patch(self._base('atalhos', doc_id) + '?' + mask, headers=self._headers(), json=data)
+        if resp.status_code == 200:
+            self._cache_shortcuts.clear()
         return resp.status_code == 200
 
     def update_atalho_ativo(self, doc_id, ativo):
@@ -282,7 +300,6 @@ class FirebaseAuth:
         data = {"fields": {"descricao": {"stringValue": descricao}}}
         url = self._base('atalhos', doc_id) + '?updateMask.fieldPaths=descricao'
         resp = requests.patch(url, headers=self._headers(), json=data)
-        print(f"[update_descricao] status={resp.status_code} body={resp.text[:200]}")
         if resp.status_code == 200:
             self._cache_shortcuts.clear()
 
@@ -426,6 +443,7 @@ class FirebaseAuth:
                 'descricao':     f.get('descricao',     {}).get('stringValue', ''),
                 'comando_tipo':  f.get('comando_tipo',  {}).get('stringValue', ''),
                 'comando_valor': f.get('comando_valor', {}).get('stringValue', ''),
+                'acoes':         json.loads(f.get('acoes', {}).get('stringValue', '[]')),
                 'ativo':         f.get('ativo', {}).get('booleanValue', True),
                 'usuario_id':    f.get('usuario_id',    {}).get('stringValue', ''),
                 'setor':         f.get('setor',         {}).get('stringValue', ''),
@@ -825,7 +843,6 @@ class KeyboardListener:
     def check_text_shortcuts(self):
         if not self.typed_text.strip():
             return
-        uid   = self.user_data['uid']
         setor = self.user_data['setor']
 
         # Verificar templates
@@ -834,7 +851,23 @@ class KeyboardListener:
                 self._apagar_e_digitar(t['texto'], len(self.typed_text) + 1)
                 return
 
-        # Verificar shortcuts
+        # Verificar novos atalhos (shortcut)
+        for s in self.firebase.get_atalhos_setor(setor):
+            if not s.get('ativo', True): continue
+            if s.get('comando_tipo') == 'shortcut':
+                if s.get('comando_valor', '').lower() == self.typed_text.strip().lower():
+                    n = len(self.typed_text) + 1
+                    def run(acoes=s['acoes'], nb=n):
+                        for _ in range(nb):
+                            self.keyboard_controller.press(Key.backspace)
+                            self.keyboard_controller.release(Key.backspace)
+                            time.sleep(0.01)
+                        time.sleep(0.05)
+                        self.execute_atalho(acoes)
+                    threading.Thread(target=run, daemon=True).start()
+                    return
+
+        # Verificar shortcuts antigos
         for s in self.firebase.get_shortcuts_setor(setor):
             if not s['ativo']: continue
             tecla = s.get('tecla_atalho', '')
@@ -848,15 +881,65 @@ class KeyboardListener:
 
     def check_alt_shortcuts(self, char):
         setor = self.user_data['setor']
+
+        # Verificar novos atalhos (alt_tecla)
+        for s in self.firebase.get_atalhos_setor(setor):
+            if not s.get('ativo', True): continue
+            if s.get('comando_tipo') == 'alt_tecla':
+                teclas = [t.strip() for t in s.get('comando_valor', '').split(',')]
+                if any(t.upper() == char.upper() for t in teclas):
+                    def run(acoes=s['acoes']):
+                        time.sleep(0.1)
+                        self.execute_atalho(acoes)
+                    threading.Thread(target=run, daemon=True).start()
+                    return
+
+        # Verificar shortcuts antigos
         for s in self.firebase.get_shortcuts_setor(setor):
             if not s['ativo']: continue
             tecla = s.get('tecla_atalho', '')
             if len(tecla) <= 2 and tecla.upper() == char.upper():
-                def run():
+                def run(acoes=s['acoes']):
                     time.sleep(0.1)
-                    self.execute_shortcut(s['acoes'])
+                    self.execute_shortcut(acoes)
                 threading.Thread(target=run, daemon=True).start()
                 return
+
+    def execute_atalho(self, acoes):
+        """Executa lista de ações no formato estruturado (dicts com tipo, x, y, etc)."""
+        def run():
+            try:
+                time.sleep(0.1)
+                for acao in acoes:
+                    # suporte a formato antigo (string) e novo (dict)
+                    if isinstance(acao, str):
+                        import re
+                        m = re.match(r'Clicar com o bot[aã]o E (\d+) vez', acao)
+                        if m:
+                            for _ in range(int(m.group(1))): self.mouse_controller.click(Button.left, 1); time.sleep(0.08)
+                        elif re.search(r'bot[aã]o D\.', acao): self.mouse_controller.click(Button.right, 1)
+                        elif re.search(r'bot[aã]o do meio\.', acao): self.mouse_controller.click(Button.middle, 1)
+                        elif re.match(r'Esperar (\d+) ms', acao): time.sleep(int(re.match(r'Esperar (\d+) ms', acao).group(1)) / 1000.0)
+                        time.sleep(0.05)
+                        continue
+                    tipo = acao.get('tipo', '')
+                    if tipo == 'click':
+                        x, y = acao.get('x'), acao.get('y')
+                        if x is not None and y is not None:
+                            self.mouse_controller.position = (x, y)
+                            time.sleep(0.05)
+                        botao = acao.get('botao', 'E')
+                        qtd   = acao.get('qtd', 1)
+                        btn   = Button.left if botao == 'E' else (Button.right if botao == 'D' else Button.middle)
+                        for _ in range(qtd):
+                            self.mouse_controller.click(btn, 1)
+                            if qtd > 1: time.sleep(0.08)
+                    elif tipo == 'esperar':
+                        time.sleep(acao.get('ms', 0) / 1000.0)
+                    time.sleep(0.05)
+            except Exception as e:
+                print(f"Erro ao executar atalho: {e}")
+        threading.Thread(target=run, daemon=True).start()
 
     def _apagar_e_digitar(self, texto, n_backspaces):
         def run():
@@ -1237,7 +1320,8 @@ class OverlayDialog(QWidget):
         card_pos  = self.content_card.mapToParent(QPoint(0, 0))
         card_rect = QRect(card_pos, self.content_card.size())
         if not card_rect.contains(event.pos()):
-            self.close()
+            if not getattr(self, '_block_outside_close', False):
+                self.close()
         else:
             event.ignore()
 
@@ -1361,6 +1445,10 @@ class MainMenu(QWidget):
                 from PyQt6.QtCore import QRect
                 geo = self.geometry()
                 if not geo.contains(int(x), int(y)):
+                    # não fechar se overlay de criação/edição estiver aberto
+                    overlay = getattr(self, 'overlay_widget', None)
+                    if overlay and overlay.isVisible() and getattr(overlay, '_block_outside_close', False):
+                        return
                     QTimer.singleShot(0, self.close)
                     return False
             self._pynput_listener = _mouse.Listener(on_click=_on_click)
@@ -1910,6 +1998,8 @@ class MainMenu(QWidget):
             btn_edit.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:4px;}QPushButton:hover{background:rgba(0,0,0,0.06);}")
             btn_del = QPushButton(); btn_del.setIcon(create_svg_icon(svg_del_c, 16)); btn_del.setIconSize(QSize(16,16)); btn_del.setFixedSize(24,24)
             btn_del.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:4px;}QPushButton:hover{background:rgba(144,11,9,0.08);}")
+            btn_edit.clicked.connect(lambda _, atl=s: self.show_edit_atalho_overlay(atl))
+            btn_del.clicked.connect(lambda _, atl=s: self.delete_atalho(atl))
             btns_row.addWidget(btn_edit); btns_row.addWidget(btn_del)
             right_col.addLayout(btns_row)
             outer.addLayout(right_col)
@@ -1934,6 +2024,7 @@ class MainMenu(QWidget):
             self.show_add_atalho_overlay()
             return
         self.overlay_widget = OverlayDialog(self)
+        self.overlay_widget._block_outside_close = True
 
         title = QLabel("Criação de template")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1999,10 +2090,12 @@ class MainMenu(QWidget):
         else:
             QMessageBox.critical(self, "Erro", "Falha ao salvar no Firebase. Verifique sua conexão.")
 
-    def show_add_atalho_overlay(self):
+    def show_add_atalho_overlay(self, atl_existente=None):
+        editando = atl_existente is not None
         self.overlay_widget = OverlayDialog(self)
+        self.overlay_widget._block_outside_close = True
 
-        title = QLabel("Criação de Atalho")
+        title = QLabel("Editar Atalho" if editando else "Criação de Atalho")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-family:'Inter'; font-size:14px; font-weight:bold; color:black; padding:0px 0px 8px 0px;")
         self.overlay_widget.add_content(title)
@@ -2014,6 +2107,8 @@ class MainMenu(QWidget):
             QLineEdit:focus { border:2px solid #B97E88; }
             QLineEdit::placeholder { color:#999; }
         """)
+        if editando:
+            self.atl_titulo.setText(atl_existente.get('titulo', ''))
         self.overlay_widget.add_content(self.atl_titulo)
 
         # dropdown "Escolha o tipo de comando"
@@ -2169,6 +2264,105 @@ class MainMenu(QWidget):
         btn_click_esq.setCursor(Qt.CursorShape.PointingHandCursor)
         add_acao_opts.addWidget(btn_click_esq)
 
+        btn_esperar = QPushButton("Esperar")
+        btn_esperar.setStyleSheet("""
+            QPushButton { font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent;
+                          border:none; text-align:left; padding:5px 6px; border-radius:4px; }
+            QPushButton:hover { background:rgba(0,0,0,0.08); }
+        """)
+        btn_esperar.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_acao_opts.addWidget(btn_esperar)
+
+        def _iniciar_esperar():
+            self._add_acao_expanded = False
+            self._add_acao_container.setVisible(False)
+            _mostrar_editor_esperar()
+
+        def _mostrar_editor_esperar(wrapper_existente=None):
+            wrapper = QWidget(); wrapper.setStyleSheet("background:transparent;")
+            wl = QVBoxLayout(wrapper); wl.setContentsMargins(0,0,0,2); wl.setSpacing(2)
+
+            card = QWidget(); card.setStyleSheet("background:#C2C0B6; border-radius:6px;")
+            cl = QHBoxLayout(card); cl.setContentsMargins(8,6,8,6); cl.setSpacing(6)
+
+            lbl_pre = QLabel("Esperar")
+            lbl_pre.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:none;")
+
+            spin_ms = QLineEdit()
+            spin_ms.setFixedWidth(60)
+            spin_ms.setPlaceholderText("ms")
+            spin_ms.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            spin_ms.setStyleSheet("QLineEdit{font-family:'Inter';font-size:12px;color:#1D1B20;background:white;border:1px solid #aaa;border-radius:4px;padding:2px;}")
+
+            lbl_ms = QLabel("ms")
+            lbl_ms.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:none;")
+
+            lbl_hint_ms = QLabel("1000 = 1 segundo")
+            lbl_hint_ms.setStyleSheet("font-family:'Inter'; font-size:10px; color:#666; background:transparent; border:none;")
+
+            btn_ok2 = QPushButton(); btn_ok2.setIcon(create_svg_icon(svg_check, 13)); btn_ok2.setIconSize(QSize(13,13)); btn_ok2.setFixedSize(22,22)
+            btn_ok2.setStyleSheet("QPushButton{background:transparent;border:none;}QPushButton:hover{background:rgba(73,151,20,0.1);border-radius:4px;}")
+            btn_cx2 = QPushButton(); btn_cx2.setIcon(create_svg_icon(svg_xmark, 13)); btn_cx2.setIconSize(QSize(13,13)); btn_cx2.setFixedSize(22,22)
+            btn_cx2.setStyleSheet("QPushButton{background:transparent;border:none;}QPushButton:hover{background:rgba(144,11,9,0.1);border-radius:4px;}")
+
+            def _confirmar_esperar():
+                try: ms = max(1, int(spin_ms.text()))
+                except: return
+                card_conf = _criar_card_esperar(ms)
+                idx = self._acoes_lista_layout.indexOf(wrapper)
+                wrapper.setParent(None); wrapper.deleteLater()
+                if wrapper_existente:
+                    try: wrapper_existente.setParent(None); wrapper_existente.deleteLater()
+                    except RuntimeError: pass
+                self._acoes_lista_layout.insertWidget(max(0, idx), card_conf)
+
+            def _cancelar_esperar():
+                if wrapper_existente: wrapper_existente.setVisible(True)
+                wrapper.setParent(None); wrapper.deleteLater()
+
+            def _key_ms(e):
+                if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter): _confirmar_esperar()
+                elif e.key() == Qt.Key.Key_Escape: _cancelar_esperar()
+                else: QLineEdit.keyPressEvent(spin_ms, e)
+            spin_ms.keyPressEvent = _key_ms
+
+            btn_ok2.clicked.connect(_confirmar_esperar)
+            btn_cx2.clicked.connect(_cancelar_esperar)
+
+            cl.addWidget(lbl_pre); cl.addWidget(spin_ms); cl.addWidget(lbl_ms); cl.addStretch()
+            cl.addWidget(btn_ok2); cl.addWidget(btn_cx2)
+            wl.addWidget(card)
+            wl.addWidget(lbl_hint_ms)
+
+            if wrapper_existente:
+                wrapper_existente.setVisible(False)
+                idx = self._acoes_lista_layout.indexOf(wrapper_existente)
+                self._acoes_lista_layout.insertWidget(idx, wrapper)
+            else:
+                self._acoes_lista_layout.addWidget(wrapper)
+            spin_ms.setFocus()
+
+        def _criar_card_esperar(ms):
+            wrapper = QWidget(); wrapper.setStyleSheet("background:transparent;")
+            wrapper.setProperty('acao_data', json.dumps({'tipo': 'esperar', 'ms': ms}))
+            wl = QHBoxLayout(wrapper); wl.setContentsMargins(0,0,0,0); wl.setSpacing(4)
+            card = QWidget(); card.setStyleSheet("background:#C2C0B6; border-radius:6px;")
+            cl = QHBoxLayout(card); cl.setContentsMargins(8,6,8,6); cl.setSpacing(6)
+            desc = QLabel(f"Esperar {ms} ms")
+            desc.setStyleSheet("font-family:'Inter'; font-size:12px; color:#1D1B20; background:transparent; border:none;")
+            cl.addWidget(desc); cl.addStretch()
+            btn_ed = QPushButton(); btn_ed.setIcon(create_svg_icon(svg_edit_a, 14)); btn_ed.setIconSize(QSize(14,14)); btn_ed.setFixedSize(22,22)
+            btn_ed.setStyleSheet("QPushButton{background:transparent;border:none;}QPushButton:hover{background:rgba(0,0,0,0.06);border-radius:4px;}")
+            btn_rm = QPushButton(); btn_rm.setIcon(create_svg_icon(svg_del_a, 14)); btn_rm.setIconSize(QSize(14,14)); btn_rm.setFixedSize(22,22)
+            btn_rm.setStyleSheet("QPushButton{background:transparent;border:none;}QPushButton:hover{background:rgba(144,11,9,0.08);border-radius:4px;}")
+            btn_ed.clicked.connect(lambda: _mostrar_editor_esperar(wrapper))
+            btn_rm.clicked.connect(lambda: (wrapper.setParent(None), wrapper.deleteLater()))
+            cl.addWidget(btn_ed); cl.addWidget(btn_rm)
+            wl.addWidget(card)
+            return wrapper
+
+        btn_esperar.clicked.connect(_iniciar_esperar)
+
         def _toggle_add_acao():
             self._add_acao_expanded = not self._add_acao_expanded
             self._add_acao_container.setVisible(self._add_acao_expanded)
@@ -2206,7 +2400,11 @@ class MainMenu(QWidget):
             self._capture_overlay.setCursor(Qt.CursorShape.CrossCursor)
             self._capture_overlay.show()
 
-        def _mostrar_editor_acao(x, y, wrapper_existente=None):
+        def _mostrar_editor_acao(x, y, wrapper_existente=None, dados_existentes=None):
+            # extrair dados existentes para pré-preencher
+            op_inicial  = dados_existentes.get('botao', None) if dados_existentes else None
+            qtd_inicial = dados_existentes.get('qtd', 1)      if dados_existentes else 1
+
             wrapper = QWidget(); wrapper.setStyleSheet("background:transparent;")
             wl = QVBoxLayout(wrapper); wl.setContentsMargins(0,0,0,2); wl.setSpacing(2)
 
@@ -2242,18 +2440,80 @@ class MainMenu(QWidget):
             lbl_hint.setStyleSheet("font-family:'Inter'; font-size:10px; color:#666; background:transparent; border:none;")
             lbl_hint.setVisible(False)
 
-            botao_sel = [None]
+            botao_sel = [op_inicial]
+            opcoes = ['E', 'D', 'do meio']
+            idx_hover = [-1]
+            botoes_dd = []
+
+            # pré-preencher se editando
+            if op_inicial:
+                btn_dd.setText(op_inicial)
+                qtd_w.setVisible(op_inicial == 'E')
+                lbl_hint.setVisible(op_inicial == 'E')
+                if op_inicial == 'E':
+                    spin.setText(str(qtd_inicial))
+                    _upd_vez()
+
+            def _atualizar_highlight():
+                for i, b in enumerate(botoes_dd):
+                    if i == idx_hover[0]:
+                        b.setStyleSheet("QPushButton{font-family:'Inter';font-size:12px;color:#1D1B20;background:rgba(0,0,0,0.12);border:none;text-align:left;padding:4px 6px;border-radius:4px;}")
+                    else:
+                        b.setStyleSheet("QPushButton{font-family:'Inter';font-size:12px;color:#1D1B20;background:transparent;border:none;text-align:left;padding:4px 6px;border-radius:4px;}QPushButton:hover{background:rgba(0,0,0,0.08);}")
+
             def _sel_botao(op):
                 btn_dd.setText(op); dd_cont.setVisible(False); botao_sel[0] = op
                 qtd_w.setVisible(op == 'E'); lbl_hint.setVisible(op == 'E')
-                if op == 'E': spin.setFocus()
+                if op == 'E': QTimer.singleShot(50, spin.setFocus)
 
-            for op in ['E', 'D', 'do meio']:
+            def _key_dd(ev):
+                # se o spin está com foco, não interceptar — ele tem seu próprio keyPressEvent
+                if qtd_w.isVisible() and spin.hasFocus():
+                    return
+                if dd_cont.isVisible():
+                    if ev.key() == Qt.Key.Key_Down:
+                        idx_hover[0] = min(idx_hover[0] + 1, len(opcoes) - 1)
+                        _atualizar_highlight()
+                    elif ev.key() == Qt.Key.Key_Up:
+                        idx_hover[0] = max(idx_hover[0] - 1, 0)
+                        _atualizar_highlight()
+                    elif ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                        if idx_hover[0] >= 0:
+                            op = opcoes[idx_hover[0]]
+                            _sel_botao(op)
+                            if op != 'E':
+                                _confirmar()
+                    elif ev.key() == Qt.Key.Key_Escape:
+                        dd_cont.setVisible(False)
+                else:
+                    if ev.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                        idx_hover[0] = 0
+                        dd_cont.setVisible(True)
+                        _atualizar_highlight()
+                        btn_dd.setFocus()
+                    elif ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                        if botao_sel[0] and botao_sel[0] != 'E':
+                            _confirmar()
+                        elif botao_sel[0] == 'E':
+                            QTimer.singleShot(50, spin.setFocus)
+                        else:
+                            idx_hover[0] = 0
+                            dd_cont.setVisible(True)
+                            _atualizar_highlight()
+                            btn_dd.setFocus()
+                    elif ev.key() == Qt.Key.Key_Escape:
+                        _cancelar()
+
+            btn_dd.keyPressEvent = _key_dd
+            btn_dd.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+            for op in opcoes:
                 b = QPushButton(op)
                 b.setStyleSheet("QPushButton{font-family:'Inter';font-size:12px;color:#1D1B20;background:transparent;border:none;text-align:left;padding:4px 6px;border-radius:4px;}QPushButton:hover{background:rgba(0,0,0,0.08);}")
                 b.setCursor(Qt.CursorShape.PointingHandCursor)
                 b.clicked.connect(lambda _, o=op: _sel_botao(o))
                 dc_l.addWidget(b)
+                botoes_dd.append(b)
 
             btn_dd.clicked.connect(lambda: dd_cont.setVisible(not dd_cont.isVisible()))
 
@@ -2289,7 +2549,7 @@ class MainMenu(QWidget):
             _pin_timer.timeout.connect(_show_pin_tooltip)
 
             # recapturar: fecha overlay, captura novo ponto, reabre editor
-            def _recapturar(we=wrapper):
+            def _recapturar(we=wrapper_existente, op=botao_sel, qtd_spin=spin):
                 _hide_pin_tooltip()
                 self.hide()
                 screen = QApplication.primaryScreen().geometry()
@@ -2304,12 +2564,21 @@ class MainMenu(QWidget):
                 lbl2 = QLabel("Clique onde deseja executar a ação", self._capture_overlay)
                 lbl2.setStyleSheet("color:white; font-family:'Inter'; font-size:14px; background:transparent;")
                 lbl2.adjustSize(); lbl2.move(screen.width()//2 - lbl2.width()//2, 30)
-                def _on_recapture(ev):
+                def _on_recapture(ev, _we=we, _op=op[0], _qtd=qtd_spin.text()):
                     gpos = ev.globalPosition().toPoint()
                     nx, ny = gpos.x(), gpos.y()
                     self._capture_overlay.close(); self._capture_overlay = None
                     self.show(); self.raise_()
-                    _mostrar_editor_acao(nx, ny, we)
+                    try:
+                        qtd_val = max(1, int(_qtd))
+                    except:
+                        qtd_val = 1
+                    dados = {'botao': _op, 'qtd': qtd_val} if _op else None
+                    # remover o editor atual (wrapper) antes de reabrir
+                    wrapper.setParent(None); wrapper.deleteLater()
+                    _mostrar_editor_acao(nx, ny, _we, dados)
+                    self._notification = NotificationWidget('📍 Posição recapturada!')
+                    self._notification.show()
                 self._capture_overlay.mousePressEvent = _on_recapture
                 self._capture_overlay.setCursor(Qt.CursorShape.CrossCursor)
                 self._capture_overlay.show()
@@ -2329,7 +2598,6 @@ class MainMenu(QWidget):
                     try: qtd = max(1, int(spin.text()))
                     except: qtd = 1
                 card_conf = _criar_card_conf(x, y, op, qtd)
-                # achar índice do wrapper editor (que está visível agora)
                 idx = self._acoes_lista_layout.indexOf(wrapper)
                 wrapper.setParent(None); wrapper.deleteLater()
                 if wrapper_existente:
@@ -2360,12 +2628,26 @@ class MainMenu(QWidget):
             else:
                 self._acoes_lista_layout.addWidget(wrapper)
 
+            # abrir dropdown e focar automaticamente (só se não há dados pré-existentes)
+            def _init_dropdown():
+                if op_inicial:
+                    return  # já pré-preenchido, não abrir dropdown
+                idx_hover[0] = 0
+                dd_cont.setVisible(True)
+                _atualizar_highlight()
+                self.activateWindow()
+                self.raise_()
+                btn_dd.setFocus(Qt.FocusReason.OtherFocusReason)
+            QTimer.singleShot(100, _init_dropdown)
+
         def _criar_card_conf(x, y, op, qtd):
             if op == 'E':
                 txt = f"Clicar com o botão E {qtd} {'vez' if qtd==1 else 'vezes'}."
             else:
                 txt = f"Clicar com o botão {op}."
             wrapper = QWidget(); wrapper.setStyleSheet("background:transparent;")
+            # guardar dados estruturados para execução
+            wrapper.setProperty('acao_data', json.dumps({'tipo': 'click', 'botao': op, 'qtd': qtd, 'x': x, 'y': y}))
             wl = QHBoxLayout(wrapper); wl.setContentsMargins(0,0,0,0); wl.setSpacing(4)
             card = QWidget(); card.setStyleSheet("background:#C2C0B6; border-radius:6px;")
             cl = QHBoxLayout(card); cl.setContentsMargins(8,6,8,6); cl.setSpacing(6)
@@ -2375,7 +2657,7 @@ class MainMenu(QWidget):
             btn_ed.setStyleSheet("QPushButton{background:transparent;border:none;}QPushButton:hover{background:rgba(0,0,0,0.06);border-radius:4px;}")
             btn_rm = QPushButton(); btn_rm.setIcon(create_svg_icon(svg_del_a, 14)); btn_rm.setIconSize(QSize(14,14)); btn_rm.setFixedSize(22,22)
             btn_rm.setStyleSheet("QPushButton{background:transparent;border:none;}QPushButton:hover{background:rgba(144,11,9,0.08);border-radius:4px;}")
-            btn_ed.clicked.connect(lambda: _mostrar_editor_acao(x, y, wrapper))
+            btn_ed.clicked.connect(lambda _=None, _x=x, _y=y, _w=wrapper, _op=op, _qtd=qtd: _mostrar_editor_acao(_x, _y, _w, {'botao': _op, 'qtd': _qtd}))
             btn_rm.clicked.connect(lambda: (wrapper.setParent(None), wrapper.deleteLater()))
             cl.addWidget(btn_ed); cl.addWidget(btn_rm)
             wl.addWidget(card)
@@ -2389,9 +2671,9 @@ class MainMenu(QWidget):
         self.overlay_widget.add_content(acoes_frame)
 
         btns = QHBoxLayout(); btns.setSpacing(10); btns.addStretch()
-        b_criar = QPushButton("Criar"); b_criar.setFixedWidth(90)
+        b_criar = QPushButton("Salvar" if editando else "Criar"); b_criar.setFixedWidth(90)
         b_criar.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:white;background:#499714;border:none;border-radius:6px;padding:8px 16px;}QPushButton:hover{background:#3d8010;}")
-        b_criar.clicked.connect(self._salvar_atalho)
+        b_criar.clicked.connect(lambda: self._salvar_atalho(atl_existente))
         b_cancel = QPushButton("Cancelar"); b_cancel.setFixedWidth(90)
         b_cancel.setStyleSheet("QPushButton{font-family:'Inter';font-size:13px;color:#499714;background:transparent;border:2px solid #499714;border-radius:6px;padding:8px 16px;}QPushButton:hover{background:rgba(73,151,20,0.1);}")
         b_cancel.clicked.connect(self.overlay_widget.close)
@@ -2401,7 +2683,33 @@ class MainMenu(QWidget):
 
         self.overlay_widget.show()
 
-    def _salvar_atalho(self):
+        # pré-preencher tipo e ações se editando
+        if editando:
+            cmd_tipo  = atl_existente.get('comando_tipo', '')
+            cmd_valor = atl_existente.get('comando_valor', '')
+            if cmd_tipo == 'alt_tecla':
+                _on_opcao(op="Alt + tecla")
+                if hasattr(self, 'atl_teclas'): self.atl_teclas.setText(cmd_valor)
+            elif cmd_tipo == 'shortcut':
+                _on_opcao(op="Atalho como dos templates")
+                if hasattr(self, 'atl_shortcut'): self.atl_shortcut.setText(cmd_valor)
+            # fechar o dropdown após selecionar
+            self._atl_tipo_container.setVisible(False)
+            self._atl_tipo_expanded = False
+            from PyQt6.QtGui import QTransform, QIcon
+            px = create_svg_icon(svg_chevron_s, 12).pixmap(12, 12)
+            self._btn_tipo_chevron.setIcon(QIcon(px.transformed(QTransform().rotate(0))))
+            # pré-carregar ações
+            for acao in atl_existente.get('acoes', []):
+                if isinstance(acao, dict) and acao.get('tipo') == 'click':
+                    card = _criar_card_conf(acao['x'], acao['y'], acao['botao'], acao.get('qtd', 1))
+                    self._acoes_lista_layout.addWidget(card)
+                elif isinstance(acao, dict) and acao.get('tipo') == 'esperar':
+                    card = _criar_card_esperar(acao['ms'])
+                    self._acoes_lista_layout.addWidget(card)
+
+    def _salvar_atalho(self, atl_existente=None):
+        editando = atl_existente is not None
         titulo = getattr(self, 'atl_titulo', None)
         titulo = titulo.text().strip() if titulo else ''
         if not titulo:
@@ -2409,14 +2717,23 @@ class MainMenu(QWidget):
             return
         # tipo de comando
         tipo = getattr(self, '_atl_tipo_selecionado', None)
+        if not tipo:
+            self.show_field_error(self.atl_titulo, "Escolha o tipo de comando para ativar o atalho")
+            return
         if tipo == 'Alt + tecla':
             cmd_tipo  = 'alt_tecla'
             cmd_valor = getattr(self, 'atl_teclas', None)
             cmd_valor = cmd_valor.text().strip() if cmd_valor else ''
+            if not cmd_valor:
+                if hasattr(self, 'atl_teclas'): self.show_field_error(self.atl_teclas, "Este campo é obrigatório")
+                return
         elif tipo == 'Atalho como dos templates':
             cmd_tipo  = 'shortcut'
             cmd_valor = getattr(self, 'atl_shortcut', None)
             cmd_valor = cmd_valor.text().strip() if cmd_valor else ''
+            if not cmd_valor:
+                if hasattr(self, 'atl_shortcut'): self.show_field_error(self.atl_shortcut, "Este campo é obrigatório")
+                return
         else:
             cmd_tipo  = ''
             cmd_valor = ''
@@ -2427,16 +2744,26 @@ class MainMenu(QWidget):
             for i in range(layout.count()):
                 item = layout.itemAt(i)
                 if item and item.widget():
-                    lbl = item.widget().findChild(QLabel)
-                    if lbl: acoes.append(lbl.text())
-        ok = self.firebase.add_atalho(
-            titulo, cmd_tipo, cmd_valor, acoes,
-            self.user_data['uid'], self.user_data['setor']
-        )
+                    w = item.widget()
+                    data = w.property('acao_data')
+                    if data:
+                        acoes.append(json.loads(data))
+        if editando:
+            ok = self.firebase.update_atalho(
+                atl_existente['id'], titulo, cmd_tipo, cmd_valor, acoes
+            )
+            msg = '✓ Atalho atualizado!'
+        else:
+            ok = self.firebase.add_atalho(
+                titulo, cmd_tipo, cmd_valor, acoes,
+                self.user_data['uid'], self.user_data['setor']
+            )
+            msg = '✓ Atalho criado!'
         if ok:
             self.overlay_widget.close()
-            self._notification = NotificationWidget('✓ Atalho criado!')
+            self._notification = NotificationWidget(msg)
             self._notification.show()
+            QTimer.singleShot(100, self.show_atalhos_tab)
         else:
             QMessageBox.critical(self, "Erro", "Falha ao salvar no Firebase.")
 
@@ -2543,6 +2870,18 @@ class MainMenu(QWidget):
                                               doc_id=t['id'], nome=t['nome'],
                                               texto=t['texto'], atalho=t.get('atalho',''))
         self.add_window.show(); self.add_window.raise_(); self.add_window.activateWindow()
+
+    def delete_atalho(self, atl):
+        show_confirm(self, 'Excluir este atalho?', lambda: self._do_delete_atalho(atl))
+
+    def _do_delete_atalho(self, atl):
+        self.firebase.delete_atalho(atl['id'])
+        self._notification = NotificationWidget('✓ Atalho excluído!')
+        self._notification.show()
+        QTimer.singleShot(100, self.show_atalhos_tab)
+
+    def show_edit_atalho_overlay(self, atl):
+        self.show_add_atalho_overlay(atl_existente=atl)
 
     def delete_template(self, t):
         show_confirm(self, 'Excluir este template?', lambda: self._do_delete_template(t))
@@ -2795,7 +3134,6 @@ class MainMenu(QWidget):
                 try:
                     todos = self.firebase.get_approved_users()
                 except Exception as e:
-                    print(f"[DEBUG usuarios] erro={e}")
                     todos = []
                 self._usuarios_loaded.emit(todos)
 
